@@ -8,7 +8,7 @@ from .api import KrakenAuthBuilder, APICounter
 from .fetcher import CryptoPriceFetcher
 from .market import PositionTracker, MarketAnalyzer
 
-logging.basicConfig(level=logging.CRITICAL)
+logging.basicConfig(level=logging.INFO)
 
 class OrderManager:
     def __init__(self, auth_builder: KrakenAuthBuilder, position_tracker: PositionTracker, market_analyzer: MarketAnalyzer, price_fetcher: CryptoPriceFetcher):

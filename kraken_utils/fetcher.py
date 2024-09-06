@@ -4,7 +4,7 @@ import requests
 from .api import KrakenAuthBuilder
 
 # Set logging level to ERROR to suppress INFO messages
-logging.basicConfig(level=logging.CRITICAL)
+logging.basicConfig(level=logging.INFO)
 
 
 class CryptoPriceFetcher:

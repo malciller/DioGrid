@@ -14,7 +14,7 @@ API_KEY = os.getenv("KRAKEN_API_KEY")
 API_SECRET = os.getenv("KRAKEN_API_SECRET")
 
 # Set logging level to ERROR to suppress INFO messages
-logging.basicConfig(level=logging.CRITICAL)
+logging.basicConfig(level=logging.INFO)
 
 class KrakenAuthBuilder:
     def __init__(self, api_key: str, api_secret: str):
