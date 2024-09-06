@@ -41,7 +41,7 @@ DioGrid/
 
 ### 1. Clone the Repository
 ```bash
-git clone <https://github.com/malciller/DioGrid>
+git clone https://github.com/malciller/DioGrid
 cd DioGrid
 ```
 
