@@ -7,7 +7,7 @@ It leverages Python scripts to execute buy and sell orders at grid intervals bas
 ## Project Structure
 
 ```
-DioCrypto/
+DioGrid/
 │
 ├── kraken_utils/
 │   ├── __init__.py                # Package initialization file
@@ -41,8 +41,8 @@ DioCrypto/
 
 ### 1. Clone the Repository
 ```bash
-git clone <your-repo-url>
-cd DioCrypto
+git clone <https://github.com/malciller/DioGrid>
+cd DioGrid
 ```
 
 ### 2. Install Dependencies
