@@ -11,10 +11,10 @@ DioGrid/
 │
 ├── kraken_utils/
 │   ├── __init__.py                # Package initialization file
-│   ├── p_api.py                   # Contains KrakenAuthBuilder and APICounter
-│   ├── p_fetcher.py               # Contains CryptoPriceFetcher
-│   ├── p_market.py                # Contains MarketAnalyzer and PositionTracker
-│   └── p_orders.py                # Contains OrderManager for placing orders
+│   ├── api.py                   # Contains KrakenAuthBuilder and APICounter
+│   ├── fetcher.py               # Contains CryptoPriceFetcher
+│   ├── market.py                # Contains MarketAnalyzer and PositionTracker
+│   └── orders.py                # Contains OrderManager for placing orders
 │
 ├── main.py                        # The main script for running the trading bot
 ├── .env                           # Environment variables for API keys (not included in the repository)
