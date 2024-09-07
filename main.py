@@ -17,7 +17,7 @@ def main():
     args = parser.parse_args()
 
     auth_builder = KrakenAuthBuilder(api_key=API_KEY, api_secret=API_SECRET)
-    price_fetcher = CryptoPriceFetcher(auth_builder)
+    price_fetcher = CryptoPriceFetcher(tst)
     market_analyzer = MarketAnalyzer(price_fetcher)
     position_tracker = PositionTracker()
     order_manager = OrderManager(auth_builder, position_tracker, market_analyzer, price_fetcher, args.grid_percentage, config_file = 'config.json')
