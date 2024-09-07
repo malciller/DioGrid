@@ -140,3 +140,7 @@ python main.py --grid-percentage 0.01 --lower-bound-percentage 0.05 --max-open-o
 ## License
 
 This project is licensed under the MIT License.
+
+## Disclaimer
+
+This software is provided for personal use and educational purposes only. It is not intended to provide financial advice, nor is it an invitation to engage in cryptocurrency trading. The authors of this software are not responsible for any financial losses or damages incurred while using the software. Users should consult with a licensed financial advisor before engaging in cryptocurrency trading. Cryptocurrency trading carries a high level of risk, and users should only trade with funds they can afford to lose.
