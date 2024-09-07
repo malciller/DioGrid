@@ -24,7 +24,7 @@ class TestKrakenAuthBuilder(unittest.TestCase):
         self.assertIsInstance(signature, str)
         self.assertGreater(len(signature), 0)
 
-
+#less precision, realtime tracking applied
 class TestAPICounter(unittest.TestCase):
     def setUp(self):
         self.api_counter = APICounter(max_value=20, decay_rate_per_second=0.5)
