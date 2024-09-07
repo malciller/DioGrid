@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.CRITICAL)
 
 class TestKrakenAuthBuilder(unittest.TestCase):
     def setUp(self):
-        # Use mock values for testing
+        # Use mock values for testing updated to work with github actions
         self.api_key = 'test_api_key'
         self.api_secret = 'dGVzdF9hcGlfc2VjcmV0'  # Base64 encoded 'test_api_secret'
         self.auth_builder = KrakenAuthBuilder(self.api_key, self.api_secret)
