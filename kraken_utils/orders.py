@@ -226,52 +226,61 @@ class OrderManager:
 
     def execute_grid_strategy(self, current_price: float, grid_percentage: float, lower_bound_percentage: float, pair: str, max_open_orders: int):
         logging.info(f"Executing Grid Strategy for {pair}: current_price={current_price}")
-
-        self.market_analyzer.update_price_history(pair)
-        volatility = self.market_analyzer.calculate_volatility(pair)
-
-        grid_interval = current_price * grid_percentage
-
+        
+        # Calculate the initial interval and grid interval
+        initial_interval = current_price * (grid_percentage / 2)  # Half of grid_percentage for first orders
+        grid_interval = current_price * grid_percentage  # Full grid_percentage for subsequent orders
+        
         lower_bound = current_price * (1 - lower_bound_percentage)
         upper_bound = current_price * (1 + lower_bound_percentage)
-
+        
         logging.info(f"Bounds for {pair}: lower={lower_bound}, upper={upper_bound}")
-
+        logging.info(f"Initial interval: {initial_interval:.2f}")
+        logging.info(f"Grid interval: {grid_interval:.2f}")
+        
         if pair not in self.open_buy_orders:
             self.open_buy_orders[pair] = []
         if pair not in self.open_sell_orders:
             self.open_sell_orders[pair] = []
-
+        
         num_open_buy_orders = len(self.open_buy_orders[pair])
         num_open_sell_orders = len(self.open_sell_orders[pair])
-        max_sell_orders = int(max_open_orders * 2)
-
+        max_sell_orders = max_open_orders
+        
         logging.info(f"Number of open buy orders for {pair}: {num_open_buy_orders}/{max_open_orders}")
         logging.info(f"Number of open sell orders for {pair}: {num_open_sell_orders}/{max_sell_orders}")
-
+        
         self.api_counter.wait_until_ready(api_call_weight=0)
-
+        
+        # Place new buy orders
         num_new_buy_orders = max_open_orders - num_open_buy_orders
         if num_new_buy_orders > 0:
+            buy_price = current_price - initial_interval
             for i in range(num_new_buy_orders):
-                buy_price = current_price - (i + 1) * grid_interval
                 if buy_price < lower_bound:
                     logging.info(f"Skipping buy order: buy price {buy_price} is below the lower bound {lower_bound}")
                     break
                 logging.info(f"Placing buy order for {pair} at {buy_price}")
                 self._execute_buy_and_sell_orders(buy_price, current_price, grid_interval, pair, place_buy=True)
-
+                buy_price -= grid_interval  # Use grid_interval for subsequent orders
+        
+        # Place new sell orders
         num_new_sell_orders = max_sell_orders - num_open_sell_orders
         if num_new_sell_orders > 0:
+            sell_price = current_price + initial_interval
             for i in range(num_new_sell_orders):
-                sell_price = current_price + (i + 1) * grid_interval
                 if sell_price > upper_bound:
                     logging.info(f"Skipping sell order: sell price {sell_price} is above the upper bound {upper_bound}")
                     break
                 logging.info(f"Placing sell order for {pair} at {sell_price}")
                 self._execute_buy_and_sell_orders(sell_price, current_price, grid_interval, pair, place_buy=False)
-
+                sell_price += grid_interval  # Use grid_interval for subsequent orders
+        
         self.update_log_file()
+
+
+
+
 
     def _execute_buy_and_sell_orders(self, price: float, current_price: float, grid_interval: float, pair: str, place_buy: bool):
         min_trade_size = self._get_min_trade_size(pair)
