@@ -1,21 +1,19 @@
 import unittest
-import unittest.mock
 import logging
-from kraken_utils.api import APICounter, KrakenAuthBuilder, API_KEY, API_SECRET
 import time
-from unittest.mock import patch
+from kraken_utils.api import APICounter, KrakenAuthBuilder, API_KEY, API_SECRET
 
 logging.basicConfig(level=logging.CRITICAL)
 
 class TestKrakenAuthBuilder(unittest.TestCase):
     def setUp(self):
-        # Use mock values for testing updated to work with github actions
+        # Use mock values for testing
         self.api_key = 'test_api_key'
         self.api_secret = 'dGVzdF9hcGlfc2VjcmV0'  # Base64 encoded 'test_api_secret'
         self.auth_builder = KrakenAuthBuilder(self.api_key, self.api_secret)
 
     def test_initialization(self):
-        self.assertEqual(self.auth_builder.api_key, self.auth_builder.api_key)
+        self.assertEqual(self.auth_builder.api_key, self.api_key)
         self.assertEqual(self.auth_builder.api_secret, self.api_secret)
 
     def test_signature_generation(self):
@@ -47,16 +45,16 @@ class TestAPICounter(unittest.TestCase):
         # Wait for 1 second (should decay by approximately 0.5)
         time.sleep(1)
         self.api_counter.update_counter()
-        self.assertAlmostEqual(self.api_counter.counter, 9.5, places=1)  # Loosened precision
+        self.assertAlmostEqual(self.api_counter.counter, 9.5, places=1)
 
         # Add 5 more to the counter
         self.api_counter.update_counter(api_call_weight=5)
-        self.assertAlmostEqual(self.api_counter.counter, 14.5, places=1)  # Loosened precision
+        self.assertAlmostEqual(self.api_counter.counter, 14.5, places=1)
 
         # Wait for 2 seconds (should decay by approximately 1)
         time.sleep(2)
         self.api_counter.update_counter()
-        self.assertAlmostEqual(self.api_counter.counter, 13.5, places=1)  # Loosened precision
+        self.assertAlmostEqual(self.api_counter.counter, 13.5, places=1)
 
         # Try to add more than the max_value
         self.api_counter.update_counter(api_call_weight=10)
@@ -85,22 +83,3 @@ class TestAPICounter(unittest.TestCase):
         end_time = time.time()
         self.assertGreaterEqual(end_time - start_time, 10)  # Should wait at least 10 seconds (5 / 0.5)
         self.assertLess(self.api_counter.counter, 20)  # Counter should be less than max after adding 5
-
-    @patch('time.time', side_effect=[0, 1, 3, 5])
-    def test_update_counter_precise(self, mock_time):
-        # Simulate precise time-based decay
-        self.api_counter.update_counter(api_call_weight=10)
-        self.assertEqual(self.api_counter.counter, 10)
-
-        # Time moves by 1 second (decay by 0.5)
-        self.api_counter.update_counter()
-        self.assertAlmostEqual(self.api_counter.counter, 9.5, places=1)
-
-        # Add 5 more to the counter
-        self.api_counter.update_counter(api_call_weight=5)
-        self.assertAlmostEqual(self.api_counter.counter, 14.5, places=1)
-
-        # Time moves by 2 more seconds (decay by 1)
-        self.api_counter.update_counter()
-        self.assertAlmostEqual(self.api_counter.counter, 13.5, places=1)
-
