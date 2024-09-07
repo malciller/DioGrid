@@ -46,7 +46,7 @@ cd DioGrid
 ```
 
 ### 2. Install Dependencies
-Ensure you have `python3` and `pip` installed. Then install the dependencies:
+Ensure you have `python` and `pip` installed. Then install the dependencies:
 ```bash
 pip install -r requirements.txt
 ```
@@ -61,7 +61,7 @@ KRAKEN_API_SECRET=<your_api_secret>
 ### 4. Run Unit Tests
 Ensure everything is set up correctly by running the unit tests:
 ```bash
-python3 -m unittest discover tests
+python -m unittest discover tests
 ```
 
 ## Usage
@@ -69,14 +69,14 @@ python3 -m unittest discover tests
 To start the grid trading bot, run `main.py` with the necessary arguments:
 
 ```bash
-python3 main.py --grid-percentage 0.01 --lower-bound-percentage 0.05 --max-open-orders 3 --time-range 60 --pairs BTCUSD ETHUSD
+python main.py --grid-percentage 0.01 --lower-bound-percentage 0.05 --max-open-orders 3 --time-range 60 --pairs BTCUSD ETHUSD
 ```
 
 ### Arguments:
 
 - `--grid-percentage`: Grid interval as a percentage of the current price.
 - `--lower-bound-percentage`: Lower bound for grid trading.
-- `--max-open-orders`: Maximum number of open buy/sell orders.
+- `--max-open-orders`: Maximum number of open buy orders.
 - `--time-range`: Time range in seconds for checking and updating open orders.
 - `--pairs`: List of cryptocurrency pairs to trade (e.g., `BTCUSD`, `ETHUSD`).
 
