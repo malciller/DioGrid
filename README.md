@@ -68,6 +68,10 @@ KRAKEN_API_SECRET=<your_api_secret>
 
 The `config.json` file is where you manage the cryptocurrency pairs, price precisions, volume precisions, and minimum trade sizes.
 
+Kraken pairs can be found here: https://support.kraken.com/hc/en-us/articles/201893658-Currency-pairs-available-for-trading-on-Kraken
+
+Kraken price precision and min order volume can be found here: https://support.kraken.com/hc/en-us/articles/4521313131540-Price-decimal-precision
+
 #### Example `config.json` file:
 ```json
 {
