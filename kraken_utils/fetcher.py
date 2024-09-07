@@ -1,6 +1,7 @@
 import logging
-from dotenv import load_dotenv
+import json  
 import requests
+from dotenv import load_dotenv
 from .api import KrakenAuthBuilder
 
 # Set logging level to ERROR to suppress INFO messages
@@ -8,16 +9,16 @@ logging.basicConfig(level=logging.INFO)
 
 
 class CryptoPriceFetcher:
-    def __init__(self, auth_builder: KrakenAuthBuilder):
+    def __init__(self, auth_builder: KrakenAuthBuilder, config_file='config.json'):
         self.auth_builder = auth_builder
         self.base_url = "https://api.kraken.com"
-        self.kraken_pairs = {
-            'BTCUSD': 'XXBTZUSD',
-            'ETHUSD': 'XETHZUSD',
-            'XRPUSD': 'XXRPZUSD',
-            'SOLUSD': 'SOLUSD',
-            'ADAUSD': 'ADAUSD'
-        }
+
+        # Load the configuration file
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+
+        # Set kraken_pairs from the config file
+        self.kraken_pairs = config.get('kraken_pairs', {})
 
     def get_best_price(self, pair: str) -> dict:
         kraken_pair = self.kraken_pairs.get(pair, pair)

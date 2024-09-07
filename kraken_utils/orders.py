@@ -11,7 +11,7 @@ from .market import PositionTracker, MarketAnalyzer
 logging.basicConfig(level=logging.INFO)
 
 class OrderManager:
-    def __init__(self, auth_builder: KrakenAuthBuilder, position_tracker: PositionTracker, market_analyzer: MarketAnalyzer, price_fetcher: CryptoPriceFetcher, grid_percentage: float):
+    def __init__(self, auth_builder: KrakenAuthBuilder, position_tracker: PositionTracker, market_analyzer: MarketAnalyzer, price_fetcher: CryptoPriceFetcher, grid_percentage: float, config_file):
         self.auth_builder = auth_builder
         self.base_url = "https://api.kraken.com"
         self.position_tracker = position_tracker
@@ -22,6 +22,11 @@ class OrderManager:
         self.open_sell_orders = {}
         self.log_file = 'logs/bot_orders.json'
         self.api_counter = APICounter(max_value=20, decay_rate_per_second=1)
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        self.price_precision = config.get('price_precisions', {})
+        self.volume_precision = config.get('volume_precisions', {})
+        self.min_trade_size = config.get('min_trade_sizes', {})
         logging.info("OrderManager initialized")
 
     def check_and_update_open_orders(self, pairs):
@@ -283,35 +288,15 @@ class OrderManager:
                 self.position_tracker.update_position(pair, "sell", price, min_trade_size)
 
     def _round_price(self, pair: str, price: float) -> float:
-        price_precisions = {
-            'BTC/USD': 1,
-            'ETH/USD': 2,
-            'XRP/USD': 4,
-            'SOL/USD': 2,
-            'ADA/USD': 5
-        }
-        precision = price_precisions.get(pair, 2)
+        precision = self.price_precision.get(pair, 2) 
         return round(price, precision)
 
     def _round_volume(self, pair: str, volume: float) -> float:
-        volume_precisions = {
-            'BTC/USD': 4,
-            'ETH/USD': 4,
-            'XRP/USD': 0,
-            'SOL/USD': 2,
-            'ADA/USD': 0
-        }
-        precision = volume_precisions.get(pair, 4)
+        precision = self.volume_precision.get(pair, 4)  
         return round(volume, precision)
 
     def _get_min_trade_size(self, pair: str) -> float:
-        min_trade_sizes = {
-            'BTC/USD': 0.0002,
-            'ETH/USD': 0.002,
-            'XRP/USD': 10.0,
-            'SOL/USD': 0.02,
-            'ADA/USD': 20.0
-        }
-        return min_trade_sizes.get(pair, 0.0001)
+        return self.min_trade_size.get(pair, 0.0001) 
+
 
 

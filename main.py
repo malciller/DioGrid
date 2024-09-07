@@ -20,7 +20,7 @@ def main():
     price_fetcher = CryptoPriceFetcher(auth_builder)
     market_analyzer = MarketAnalyzer(price_fetcher)
     position_tracker = PositionTracker()
-    order_manager = OrderManager(auth_builder, position_tracker, market_analyzer, price_fetcher, args.grid_percentage)
+    order_manager = OrderManager(auth_builder, position_tracker, market_analyzer, price_fetcher, args.grid_percentage, config_file = 'config.json')
 
     order_manager.load_open_orders()
 

@@ -11,13 +11,14 @@ DioGrid/
 │
 ├── kraken_utils/
 │   ├── __init__.py                # Package initialization file
-│   ├── api.py                   # Contains KrakenAuthBuilder and APICounter
-│   ├── fetcher.py               # Contains CryptoPriceFetcher
-│   ├── market.py                # Contains MarketAnalyzer and PositionTracker
-│   └── orders.py                # Contains OrderManager for placing orders
+│   ├── api.py                     # Contains KrakenAuthBuilder and APICounter
+│   ├── fetcher.py                 # Contains CryptoPriceFetcher
+│   ├── market.py                  # Contains MarketAnalyzer and PositionTracker
+│   └── orders.py                  # Contains OrderManager for placing orders
 │
 ├── main.py                        # The main script for running the trading bot
 ├── .env                           # Environment variables for API keys (not included in the repository)
+├── config.json                    # Configuration file for managing trading parameters (see below)
 ├── logs/
 │   └── bot_orders.json            # Stores logs of buy/sell orders
 ├── tests/
@@ -40,26 +41,70 @@ DioGrid/
 ## Installation
 
 ### 1. Clone the Repository
+
 ```bash
 git clone https://github.com/malciller/DioGrid
 cd DioGrid
 ```
 
 ### 2. Install Dependencies
+
 Ensure you have `python` and `pip` installed. Then install the dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 3. Set Up Environment Variables
+
 Create a `.env` file in the root directory with your Kraken API credentials:
+
 ```
 KRAKEN_API_KEY=<your_api_key>
 KRAKEN_API_SECRET=<your_api_secret>
 ```
 
-### 4. Run Unit Tests
+### 4. Manage and Update the Configuration File
+
+The `config.json` file is where you manage the cryptocurrency pairs, price precisions, volume precisions, and minimum trade sizes.
+
+#### Example `config.json` file:
+```json
+{
+  "price_precisions": {
+    "BTC/USD": 1,
+    "ETH/USD": 2,
+    "XRP/USD": 4,
+    "SOL/USD": 2,
+    "ADA/USD": 5
+  },
+  "volume_precisions": {
+    "BTC/USD": 4,
+    "ETH/USD": 4,
+    "XRP/USD": 0,
+    "SOL/USD": 2,
+    "ADA/USD": 0
+  },
+  "min_trade_sizes": {
+    "BTC/USD": 0.0002,
+    "ETH/USD": 0.002,
+    "XRP/USD": 10.0,
+    "SOL/USD": 0.02,
+    "ADA/USD": 20.0
+  }
+}
+```
+
+### Steps to Update:
+
+1. **Modify Pairs**: Add or remove cryptocurrency pairs in the `config.json` file under the `price_precisions`, `volume_precisions`, and `min_trade_sizes` fields.
+2. **Save Changes**: Ensure you save the `config.json` file after making changes.
+3. **Restart the Bot**: Restart the grid trading bot to apply the new configuration.
+
+### 5. Run Unit Tests
+
 Ensure everything is set up correctly by running the unit tests:
+
 ```bash
 python -m unittest discover tests
 ```
