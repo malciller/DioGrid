@@ -11,13 +11,13 @@ from .market import PositionTracker, MarketAnalyzer
 logging.basicConfig(level=logging.INFO)
 
 class OrderManager:
-    def __init__(self, auth_builder: KrakenAuthBuilder, position_tracker: PositionTracker, market_analyzer: MarketAnalyzer, price_fetcher: CryptoPriceFetcher):
+    def __init__(self, auth_builder: KrakenAuthBuilder, position_tracker: PositionTracker, market_analyzer: MarketAnalyzer, price_fetcher: CryptoPriceFetcher, grid_percentage: float):
         self.auth_builder = auth_builder
         self.base_url = "https://api.kraken.com"
         self.position_tracker = position_tracker
         self.market_analyzer = market_analyzer
         self.price_fetcher = price_fetcher
-        self.min_grid_distance_percent = 0.0075  # 0.75% minimum grid distance
+        self.min_grid_distance_percent = grid_percentage
         self.open_buy_orders = {}
         self.open_sell_orders = {}
         self.log_file = 'logs/bot_orders.json'
