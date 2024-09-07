@@ -13,7 +13,7 @@ class TestKrakenAuthBuilder(unittest.TestCase):
         self.auth_builder = KrakenAuthBuilder(self.api_key, self.api_secret)
 
     def test_initialization(self):
-        self.assertEqual(self.auth_builder.api_key, self.api_key)
+        self.assertEqual(self.auth_builder.api_key, self.api_key)/2
         self.assertEqual(self.auth_builder.api_secret, self.api_secret)
 
     def test_signature_generation(self):
