@@ -1,13 +1,16 @@
 {
     "kraken_pairs": {
-      "BTCUSD": "XXBTZUSD",
-      "ETHUSD": "XETHZUSD",
-      "XRPUSD": "XXRPZUSD",
-      "SOLUSD": "SOLUSD",
-      "ADAUSD": "ADAUSD",
-      "AVAXUSD": "AVAXUSD",
-      "XMRUSD": "XMRUSD",
-      "TRXUSD": "TRXUSD"
+      "kraken_pairs": {
+        "BTCUSD": "XXBTZUSD",  
+        "ETHUSD": "XETHZUSD",  
+        "XRPUSD": "XXRPZUSD",  
+        "SOLUSD": "SOLUSD",    
+        "ADAUSD": "ADAUSD",    
+        "AVAXUSD": "AVAXUSD",  
+        "XMRUSD": "XMRUSD",    
+        "TRXUSD": "TRXUSD",
+        "FETUSD": "FETUSD" 
+      }
     },
     "price_precisions": {
       "BTC/USD": 1,
@@ -17,7 +20,9 @@
       "ADA/USD": 5,
       "AVAX/USD": 2,
       "XMR/USD": 2,
-      "TRX/USD": 4
+      "TRX/USD": 6,
+      "FET/USD": 4
+      
     },
     "volume_precisions": {
       "BTC/USD": 4,
@@ -27,7 +32,8 @@
       "ADA/USD": 0,
       "AVAX/USD": 2,
       "XMR/USD": 2,
-      "TRX/USD": 2
+      "TRX/USD": 0,
+      "FET/USD": 4
     },
     "min_trade_sizes": {
       "BTC/USD": 0.0001,
@@ -35,9 +41,10 @@
       "XRP/USD": 10.0,
       "SOL/USD": 0.04,
       "ADA/USD": 20.0,
-      "AVAX/USD": 0.1,
+      "AVAX/USD": 0.2,
       "XMR/USD": 0.03,
-      "TRX/USD": 40
+      "TRX/USD": 40,
+      "FET/USD": 2.5
     }
   }
   

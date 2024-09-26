@@ -9,7 +9,7 @@ from .fetcher import CryptoPriceFetcher
 from .market import PositionTracker, MarketAnalyzer
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.ERROR,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from .api import KrakenAuthBuilder
 
 # Set logging level to ERROR to suppress INFO messages
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.ERROR)
 
 
 class CryptoPriceFetcher:
