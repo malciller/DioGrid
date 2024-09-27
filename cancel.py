@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+'''
+    Handles canceling buy orders that fall out of the defined range
+
+'''
+
+
 import os
 import ccxt
 import logging
