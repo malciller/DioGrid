@@ -38,6 +38,7 @@ def main():
                     pair=pair,
                     max_open_orders=args.max_open_orders
                 )
+
             else:
                 logging.error(f"Failed to fetch the current price for {pair}")
         
