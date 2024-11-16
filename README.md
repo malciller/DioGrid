@@ -1,7 +1,7 @@
 
 # DioGrid
 
-See the Bot's Historical Performance: https://portfolio.diophantsolutions.com
+Follow DioGrid's Performance: https://portfolio.diophantsolutions.com
 
 DioGrid is a Python-based cryptocurrency grid trading bot built to interact with Kraken's API. 
 It leverages Python scripts to execute buy and sell orders at grid intervals based on predefined conditions. For those interested in expanding on this, the Kraken REST api documentation can be found here: https://docs.kraken.com/api/docs/rest-api/add-order
