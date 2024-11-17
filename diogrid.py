@@ -380,30 +380,48 @@ class MonitorOpenOrders:
             print(f"Sending order modification: {json.dumps(modify_message)}")
             await self.edit_websocket.send(json.dumps(modify_message))
             
-            # Simple timeout for response with reconnect on failure
-            try:
-                response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=5.0)
-                response_data = json.loads(response)
+            # Wait longer and handle more response types
+            start_time = time.time()
+            while time.time() - start_time < 10:  # Wait up to 10 seconds
+                try:
+                    response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=2.0)
+                    response_data = json.loads(response)
+                    
+                    # Skip heartbeat messages
+                    if response_data.get("channel") == "heartbeat":
+                        continue
+                        
+                    # Check for successful amendment
+                    if response_data.get("method") == "amend_order":
+                        if response_data.get("success"):
+                            print(f"Successfully modified order {order_id} to price {new_price}")
+                            self.active_buy_orders[order_id] = new_price
+                            return True
+                        else:
+                            error = response_data.get("error", "Unknown error")
+                            if "Order not found" in error:
+                                print(f"Order {order_id} not found - may have been filled or canceled")
+                                return False
+                            print(f"Failed to modify order {order_id}: {error}")
+                            return False
+                    
+                    # Check for execution updates that might indicate success
+                    if response_data.get("channel") == "executions":
+                        for order in response_data.get("data", []):
+                            if order.get("order_id") == order_id:
+                                if float(order.get("limit_price", 0)) == new_price:
+                                    print(f"Order {order_id} confirmed modified to {new_price}")
+                                    self.active_buy_orders[order_id] = new_price
+                                    return True
                 
-                if response_data.get("method") == "amend_order":
-                    if response_data.get("success"):
-                        print(f"Successfully modified order {order_id} to price {new_price}")
-                        self.active_buy_orders[order_id] = new_price
-                        return True
-                    else:
-                        print(f"Failed to modify order {order_id}: {response_data.get('error')}")
-                        return False
-                
-            except asyncio.TimeoutError:
-                print(f"Timeout waiting for modification response for order {order_id}")
-                # Force reconnect on timeout
-                await self.connect_edit_websocket()
-                return False
+                except asyncio.TimeoutError:
+                    continue  # Keep trying until overall timeout
+                    
+            print(f"Timeout waiting for modification confirmation for order {order_id}")
+            return False
                 
         except Exception as e:
             print(f"Error modifying order {order_id}: {e}")
-            # Force reconnect on any error
-            await self.connect_edit_websocket()
             return False
 
     async def grid_interval_exceeded_update(self):
@@ -728,52 +746,6 @@ class MonitorOpenOrders:
     def print_active_buy_orders(self):
         """Print the current active buy orders"""
         print(f"Active Buy Orders for {self.symbol}: {self.active_buy_orders}")
-
-    async def modify_order(self, order_id: str, new_price: float, order_age: float) -> bool:
-        try:
-            if not self.edit_websocket or self.edit_websocket.state != websockets.protocol.State.OPEN:
-                print("Reconnecting edit websocket...")
-                await self.connect_edit_websocket()
-                if not self.edit_websocket:
-                    return False
-
-            modify_message = {
-                "method": "amend_order",
-                "params": {
-                    "order_id": order_id,
-                    "limit_price": new_price,
-                    "token": self.kraken_ws.get_auth_token()
-                }
-            }
-            
-            print(f"Sending order modification: {json.dumps(modify_message)}")
-            await self.edit_websocket.send(json.dumps(modify_message))
-            
-            # Simple timeout for response with reconnect on failure
-            try:
-                response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=5.0)
-                response_data = json.loads(response)
-                
-                if response_data.get("method") == "amend_order":
-                    if response_data.get("success"):
-                        print(f"Successfully modified order {order_id} to price {new_price}")
-                        self.active_buy_orders[order_id] = new_price
-                        return True
-                    else:
-                        print(f"Failed to modify order {order_id}: {response_data.get('error')}")
-                        return False
-                
-            except asyncio.TimeoutError:
-                print(f"Timeout waiting for modification response for order {order_id}")
-                # Force reconnect on timeout
-                await self.connect_edit_websocket()
-                return False
-                
-        except Exception as e:
-            print(f"Error modifying order {order_id}: {e}")
-            # Force reconnect on any error
-            await self.connect_edit_websocket()
-            return False
 
     async def wait_for_order_response(self, expected_method: str, timeout: int = 10) -> dict:
         """Wait for specific order response with timeout"""
