@@ -336,29 +336,75 @@ class MonitorOpenOrders:
         self.ws_lock = asyncio.Lock() 
 
     async def connect_edit_websocket(self):
-        """Create separate websocket connection for order modifications with retry logic"""
-        max_retries = 5
-        retry_delay = 5  # seconds
+        """Connect to the edit websocket with heartbeat handling"""
+        try:
+            self.edit_websocket = await self.kraken_ws.create_connection(self.kraken_ws.ws_url_v2)
+            
+            # Start heartbeat task
+            self.heartbeat_task = asyncio.create_task(self.send_heartbeats())
+            
+            return True
+        except Exception as e:
+            print(f"Failed to connect edit websocket: {e}")
+            return False
 
-        for attempt in range(max_retries):
+    async def send_heartbeats(self):
+        """Send periodic heartbeats to keep connection alive"""
+        while True:
             try:
-                if self.edit_websocket:
-                    try:
-                        await self.edit_websocket.close()
-                    except:
-                        pass
-                    self.edit_websocket = None
-                
-                self.edit_websocket = await self.kraken_ws.create_websocket_connection()
-                #print(f"Created edit websocket connection for {self.symbol}")
-                return
-                
+                if self.edit_websocket and self.edit_websocket.state == websockets.protocol.State.OPEN:
+                    heartbeat = {"method": "ping"}
+                    await self.edit_websocket.send(json.dumps(heartbeat))
+                await asyncio.sleep(15)  # Send heartbeat every 15 seconds
             except Exception as e:
-                print(f"Attempt {attempt + 1}/{max_retries} failed to create edit websocket for {self.symbol}: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                else:
-                    raise
+                print(f"Heartbeat error: {e}")
+                await asyncio.sleep(5)
+
+    async def modify_order(self, order_id: str, new_price: float, order_age: float) -> bool:
+        try:
+            if not self.edit_websocket or self.edit_websocket.state != websockets.protocol.State.OPEN:
+                print("Reconnecting edit websocket...")
+                await self.connect_edit_websocket()
+                if not self.edit_websocket:
+                    return False
+
+            modify_message = {
+                "method": "amend_order",
+                "params": {
+                    "order_id": order_id,
+                    "limit_price": new_price,
+                    "token": self.kraken_ws.get_auth_token()
+                }
+            }
+            
+            print(f"Sending order modification: {json.dumps(modify_message)}")
+            await self.edit_websocket.send(json.dumps(modify_message))
+            
+            # Simple timeout for response with reconnect on failure
+            try:
+                response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=5.0)
+                response_data = json.loads(response)
+                
+                if response_data.get("method") == "amend_order":
+                    if response_data.get("success"):
+                        print(f"Successfully modified order {order_id} to price {new_price}")
+                        self.active_buy_orders[order_id] = new_price
+                        return True
+                    else:
+                        print(f"Failed to modify order {order_id}: {response_data.get('error')}")
+                        return False
+                
+            except asyncio.TimeoutError:
+                print(f"Timeout waiting for modification response for order {order_id}")
+                # Force reconnect on timeout
+                await self.connect_edit_websocket()
+                return False
+                
+        except Exception as e:
+            print(f"Error modifying order {order_id}: {e}")
+            # Force reconnect on any error
+            await self.connect_edit_websocket()
+            return False
 
     async def grid_interval_exceeded_update(self):
         """Monitor and adjust buy orders that exceed grid interval threshold"""
@@ -391,7 +437,7 @@ class MonitorOpenOrders:
                     #print(f"Order {order_id} price difference: {price_diff_pct:.2f}%")
                     
                     target = self.config.grid_interval  # e.g., 0.8%
-                    buffer = 0.01  # 0.1% buffer
+                    buffer = 0.1  # 0.1% buffer
                     
                     # Only adjust if the difference is GREATER than target + buffer
                     if price_diff_pct > (target + buffer):
@@ -479,15 +525,16 @@ class MonitorOpenOrders:
                             exec_type = order.get("exec_type")
                             order_status = order.get("order_status")
                             
-                            # Handle new orders
+                            # Handle new orders - only add if we don't have any active buy orders
                             if msg_type == "snapshot" or (exec_type in ["new", "pending_new"]):
                                 side = order.get("side", "").upper()
                                 order_symbol = order.get("symbol", "").upper()
                                 
                                 if order_symbol == self.symbol and side == "BUY":
-                                    self.active_buy_orders[order_id] = order.get('limit_price')
-                                    print(f"Order {order_id} added to active buy orders.")
-                                    self.print_active_buy_orders()
+                                    if not self.active_buy_orders:  # Only add if no active buy orders
+                                        self.active_buy_orders[order_id] = order.get('limit_price')
+                                        print(f"Order {order_id} added to active buy orders.")
+                                        self.print_active_buy_orders()
                             
                             # Handle cancellations and fills
                             elif order_id in self.active_buy_orders and (
@@ -529,6 +576,11 @@ class MonitorOpenOrders:
     async def create_grid_orders(self):
         """Create new grid orders if none exist"""
         try:
+            # Double check we don't have active buy orders
+            if len(self.active_buy_orders) > 0:
+                print(f"Already have {len(self.active_buy_orders)} active buy orders for {self.symbol}, skipping order creation")
+                return
+
             current_price = await self.kraken_ws.get_ticker_price(self.symbol)
             if not current_price:
                 print(f"Failed to get current price for {self.symbol}")
@@ -553,7 +605,7 @@ class MonitorOpenOrders:
             if not self.edit_websocket:
                 await self.connect_edit_websocket()
 
-            async with self.ws_lock:  # Use lock for sending messages
+            async with self.ws_lock:
                 # Place buy order
                 buy_order = {
                     "method": "add_order",
@@ -574,16 +626,11 @@ class MonitorOpenOrders:
                 
                 # Wait for buy order response
                 buy_response = await self.wait_for_order_response("add_order")
-                if buy_response.get("success"):
-                    order_id = buy_response.get("result", {}).get("order_id")
-                    if order_id:
-                        self.active_buy_orders[order_id] = buy_price
-                        print(f"Successfully placed buy order {order_id} at {buy_price}")
-                else:
+                if not buy_response.get("success"):
                     print(f"Failed to place buy order: {buy_response.get('error')}")
                     return
 
-                # Place sell order
+                # Place sell order immediately after successful buy order
                 sell_order = {
                     "method": "add_order",
                     "params": {
@@ -601,15 +648,14 @@ class MonitorOpenOrders:
                 print(f"Placing sell order: {sell_order}")
                 await self.edit_websocket.send(json.dumps(sell_order))
                 
-                # Wait for sell order response
+                # Wait for sell order response but ignore insufficient funds error
                 sell_response = await self.wait_for_order_response("add_order")
                 if sell_response.get("success"):
-                    order_id = sell_response.get("result", {}).get("order_id")
-                    print(f"Successfully placed sell order {order_id} at {sell_price}")
+                    print(f"Successfully placed sell order at {sell_price}")
+                elif sell_response.get("error") == "EOrder:Insufficient funds":
+                    print("Insufficient funds for sell order - continuing normally")
                 else:
                     print(f"Failed to place sell order: {sell_response.get('error')}")
-
-            print(f"Updated active buy orders for {self.symbol}: {self.active_buy_orders}")
 
         except Exception as e:
             print(f"Error creating grid orders for {self.symbol}: {e}")
@@ -685,7 +731,8 @@ class MonitorOpenOrders:
 
     async def modify_order(self, order_id: str, new_price: float, order_age: float) -> bool:
         try:
-            if not self.edit_websocket or self.edit_websocket.state == websockets.protocol.State.CLOSED:
+            if not self.edit_websocket or self.edit_websocket.state != websockets.protocol.State.OPEN:
+                print("Reconnecting edit websocket...")
                 await self.connect_edit_websocket()
                 if not self.edit_websocket:
                     return False
@@ -702,56 +749,66 @@ class MonitorOpenOrders:
             print(f"Sending order modification: {json.dumps(modify_message)}")
             await self.edit_websocket.send(json.dumps(modify_message))
             
-            # Wait for response with updated handling
-            response = await self.wait_for_order_response("amend_order")
-            if response.get("success"):
-                print(f"Successfully modified order {order_id} to price {new_price}")
-                self.active_buy_orders[order_id] = new_price
-                return True
-            else:
-                print(f"Failed to modify order {order_id}: {response.get('error')}")
+            # Simple timeout for response with reconnect on failure
+            try:
+                response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=5.0)
+                response_data = json.loads(response)
+                
+                if response_data.get("method") == "amend_order":
+                    if response_data.get("success"):
+                        print(f"Successfully modified order {order_id} to price {new_price}")
+                        self.active_buy_orders[order_id] = new_price
+                        return True
+                    else:
+                        print(f"Failed to modify order {order_id}: {response_data.get('error')}")
+                        return False
+                
+            except asyncio.TimeoutError:
+                print(f"Timeout waiting for modification response for order {order_id}")
+                # Force reconnect on timeout
+                await self.connect_edit_websocket()
                 return False
                 
         except Exception as e:
             print(f"Error modifying order {order_id}: {e}")
-            print(f"Full error details: {traceback.format_exc()}")
+            # Force reconnect on any error
+            await self.connect_edit_websocket()
             return False
 
     async def wait_for_order_response(self, expected_method: str, timeout: int = 10) -> dict:
-        """Wait for specific order response with lock protection"""
-        async with self.ws_lock:  # Use lock to prevent concurrent access
-            start_time = time.time()
-            
-            while time.time() - start_time < timeout:
-                try:
-                    response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=2.0)
-                    response_data = json.loads(response)
+        """Wait for specific order response with timeout"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=2.0)
+                response_data = json.loads(response)
+                
+                # Skip heartbeat messages
+                if response_data.get("channel") == "heartbeat":
+                    continue
                     
-                    # Skip heartbeat messages
-                    if response_data.get("channel") == "heartbeat":
-                        continue
-                    
-                    # For order amendments
-                    if expected_method == "amend_order":
-                        if (response_data.get("method") == "amend_order" or 
-                            response_data.get("type") == "amendment"):
-                            return {
-                                "success": True if not response_data.get("error") else False,
-                                "error": response_data.get("error"),
-                                "result": response_data.get("result", {})
-                            }
-                    # For new orders
-                    elif response_data.get("method") == expected_method:
+                # For new orders, we need the initial response
+                if expected_method == "add_order":
+                    if response_data.get("method") == "add_order":
+                        if response_data.get("success"):
+                            return response_data
+                        else:
+                            print(f"Order placement failed: {response_data.get('error')}")
+                            return response_data
+                
+                # For amendments, we need the amendment confirmation
+                elif expected_method == "amend_order":
+                    if response_data.get("method") == "amend_order":
                         return response_data
                         
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    print(f"Error in wait_for_order_response: {e}")
-                    await asyncio.sleep(0.5)
-                    continue
-            
-            return {"success": False, "error": "Timeout waiting for response"}
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                print(f"Error waiting for response: {e}")
+                await asyncio.sleep(0.5)
+                
+        print(f"Timeout waiting for {expected_method} response")
+        return {"success": False, "error": "Timeout waiting for response"}
 
 async def main():
     # Initialize everything
@@ -787,15 +844,28 @@ async def main():
         while True:
             for symbol in config.trading_pairs:
                 try:
+                    monitor = next(m for m in monitors if m.symbol == symbol)
+                    
+                    # Wait for initial snapshot to be processed
+                    if not monitor.initial_snapshot_processed:
+                        print(f"Waiting for initial snapshot for {symbol}...")
+                        await asyncio.sleep(2)
+                        continue
+
                     current_price = await kraken_ws.get_ticker_price(symbol)
                     if not current_price:
                         print(f"Failed to get current price for {symbol}")
                         await asyncio.sleep(5)
                         continue
 
-                    monitor = next(m for m in monitors if m.symbol == symbol)
-                    
-                    # Calculate the optimal grid price
+                    # Check if we have any active orders for this symbol
+                    if not monitor.active_buy_orders:
+                        print(f"No active orders found for {symbol}, creating new grid orders...")
+                        await monitor.create_grid_orders()
+                        await asyncio.sleep(2)  # Brief delay after creating orders
+                        continue
+
+                    # Rest of the existing price check and order modification logic...
                     grid_interval = config.grid_interval / 100
                     optimal_price = round(current_price * (1 - grid_interval), 1)
                     
@@ -811,7 +881,7 @@ async def main():
                         #print(f"Order {order_id} price difference: {price_diff_pct:.2f}%")
                         
                         target = config.grid_interval
-                        buffer = 0.01
+                        buffer = 0.1
                         
                         if price_diff_pct > (target + buffer):
                             #print(f"Order {order_id} needs adjustment - Current diff: {price_diff_pct:.2f}% exceeds target: {target}% + {buffer}%")
@@ -820,8 +890,7 @@ async def main():
                                 # Wait for order modification to complete
                                 success = await monitor.modify_order(order_id, optimal_price, None)
                                 if not success:
-                                    print(f"Skipping further processing for {symbol} due to failed order modification")
-                                    break  # Skip to next symbol if modification fails
+                                    print(f"{symbol} order failed") # Skip to next symbol if modification fails
                                 await asyncio.sleep(2)  # Wait between modifications
                         else:
                             print(f"Order {order_id} price difference ({price_diff_pct:.2f}%) is within acceptable range of target ({target}% ±{buffer}%)")
