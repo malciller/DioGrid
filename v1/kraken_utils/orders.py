@@ -8,7 +8,11 @@ from .api import KrakenAuthBuilder, APICounter
 from .fetcher import CryptoPriceFetcher
 from .market import PositionTracker, MarketAnalyzer
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 class OrderManager:
     def __init__(self, auth_builder: KrakenAuthBuilder, position_tracker: PositionTracker, market_analyzer: MarketAnalyzer, price_fetcher: CryptoPriceFetcher, grid_percentage: float, config_file):
@@ -27,6 +31,8 @@ class OrderManager:
         self.price_precision = config.get('price_precisions', {})
         self.volume_precision = config.get('volume_precisions', {})
         self.min_trade_size = config.get('min_trade_sizes', {})
+        self.kraken_pairs = config.get('kraken_pairs', {})
+
         logging.info("OrderManager initialized")
 
     def check_and_update_open_orders(self, pairs):
@@ -44,7 +50,6 @@ class OrderManager:
                         logging.info(f"Rate limit reached, skipping check for buy order {order['order_id']} for {pair}")
                         updated_buy_orders.append(order)
                 self.open_buy_orders[pair] = updated_buy_orders
-
             if pair in self.open_sell_orders:
                 updated_sell_orders = []
                 for order in self.open_sell_orders[pair]:
@@ -58,9 +63,12 @@ class OrderManager:
                         logging.info(f"Rate limit reached, skipping check for sell order {order['order_id']} for {pair}")
                         updated_sell_orders.append(order)
                 self.open_sell_orders[pair] = updated_sell_orders
-
+        
+            # Add a delay between order checks to avoid hitting rate limits
+            time.sleep(1)  # Add a delay of 1 second or more, adjust based on your rate limit
         self.update_log_file()
         logging.info("Open orders checked and updated for all pairs.")
+
 
 
     def load_open_orders(self):
@@ -136,6 +144,9 @@ class OrderManager:
             return False
 
     def place_order(self, side: str, price: float, quantity: float, pair: str) -> dict:
+        # Map the user-friendly pair (e.g., ETH/USD) to the Kraken pair (e.g., XETHZUSD)
+        kraken_pair = self.kraken_pairs.get(pair, pair)  # Get the Kraken pair name from the config
+
         min_trade_size = self._get_min_trade_size(pair)
         if quantity < min_trade_size:
             logging.error(f"Order size {quantity} is below the minimum for {pair} ({min_trade_size})")
@@ -156,7 +167,7 @@ class OrderManager:
             "nonce": str(int(1000 * time.time())),
             "ordertype": "limit",
             "type": side,
-            "pair": pair,
+            "pair": kraken_pair,  # Use the mapped Kraken pair name here
             "price": str(price),
             "volume": str(quantity),
         }
@@ -181,7 +192,7 @@ class OrderManager:
                     "timestamp": datetime.now().isoformat(),
                     "order_id": txid
                 }
-                self.log_order(order_details)  # Fixed: Changed from self.order to self.log_order
+                self.log_order(order_details)
                 return order_details
             else:
                 logging.error(f"Failed to place {side} order for {pair}. No txid found.")
@@ -189,6 +200,7 @@ class OrderManager:
         except requests.RequestException as e:
             logging.error(f"Error placing {side} order for {pair}: {e}")
             return {}
+
 
     def log_order(self, order_details):
         if 'order_id' not in order_details:
@@ -245,8 +257,9 @@ class OrderManager:
         
         num_open_buy_orders = len(self.open_buy_orders[pair])
         num_open_sell_orders = len(self.open_sell_orders[pair])
-        max_sell_orders = max_open_orders
-        
+
+        max_sell_orders = int(max_open_orders * 25)
+
         logging.info(f"Number of open buy orders for {pair}: {num_open_buy_orders}/{max_open_orders}")
         logging.info(f"Number of open sell orders for {pair}: {num_open_sell_orders}/{max_sell_orders}")
         
@@ -306,6 +319,3 @@ class OrderManager:
 
     def _get_min_trade_size(self, pair: str) -> float:
         return self.min_trade_size.get(pair, 0.0001) 
-
-
-

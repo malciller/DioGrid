@@ -11,3 +11,10 @@ venv/
 
 # Ignore logs
 logs/
+
+#ignore supporting .sh scripts
+*.sh
+
+#ignore supporting .py scripts
+p_cancel.py
+cron.py
