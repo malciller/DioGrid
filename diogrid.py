@@ -179,8 +179,8 @@ class KrakenWebsocket:
                     pass
                 self.edit_websocket = None
 
-            websocket = await websockets.connect(self.ws_url_v2)
-            token = self.get_auth_token()
+            websocket = await websockets.connect(self.kraken_ws.ws_url_v2)  # Use kraken_ws instance
+            token = self.kraken_ws.get_auth_token()  # Use kraken_ws instance
             if not token:
                 raise ValueError("Failed to get authentication token")
 
@@ -201,9 +201,8 @@ class KrakenWebsocket:
             if response_data.get("error"):
                 raise ValueError(f"Authentication error: {response_data['error']}")
             
-            #print("Successfully created and authenticated new websocket connection")
             return websocket
-            
+                
         except Exception as e:
             print(f"Error creating websocket connection: {e}")
             raise
@@ -333,12 +332,34 @@ class MonitorOpenOrders:
         self.edit_websocket = None  # Separate websocket for order modifications
         self.active_buy_orders = {}  # Track active buy orders
         self.initial_snapshot_processed = False
-        self.ws_lock = asyncio.Lock() 
+        self.ws_lock = asyncio.Lock()
 
     async def connect_edit_websocket(self):
         """Connect to the edit websocket with heartbeat handling"""
         try:
-            self.edit_websocket = await self.kraken_ws.create_connection(self.kraken_ws.ws_url_v2)
+            self.edit_websocket = await websockets.connect(self.kraken_ws.ws_url_v2)
+            token = self.kraken_ws.get_auth_token()
+            if not token:
+                print("Failed to get auth token")
+                return False
+
+            # Initial authentication
+            auth_message = {
+                "method": "subscribe",
+                "params": {
+                    "channel": "executions",
+                    "token": token,
+                    "snap_orders": True
+                }
+            }
+            
+            await self.edit_websocket.send(json.dumps(auth_message))
+            response = await self.edit_websocket.recv()
+            response_data = json.loads(response)
+            
+            if response_data.get("error"):
+                print(f"Authentication error: {response_data['error']}")
+                return False
             
             # Start heartbeat task
             self.heartbeat_task = asyncio.create_task(self.send_heartbeats())
@@ -591,20 +612,101 @@ class MonitorOpenOrders:
             print(f"Error creating new grid orders for {self.symbol}: {e}")
             print(f"Full error details: {traceback.format_exc()}")
 
+    async def create_websocket_connection(self):
+        """Create a new websocket connection for order modifications"""
+        try:
+            # Check if existing connection is closed
+            if self.edit_websocket and self.edit_websocket.state == websockets.protocol.State.CLOSED:
+                try:
+                    await self.edit_websocket.close()
+                except:
+                    pass
+                self.edit_websocket = None
+
+            websocket = await websockets.connect(self.ws_url_v2)
+            token = self.get_auth_token()
+            if not token:
+                raise ValueError("Failed to get authentication token")
+
+            # Initial authentication with executions channel
+            auth_message = {
+                "method": "subscribe",
+                "params": {
+                    "channel": "executions",
+                    "token": token,
+                    "snap_orders": True
+                }
+            }
+            
+            await websocket.send(json.dumps(auth_message))
+            response = await websocket.recv()
+            response_data = json.loads(response)
+            
+            if response_data.get("error"):
+                raise ValueError(f"Authentication error: {response_data['error']}")
+            
+            return websocket
+                
+        except Exception as e:
+            print(f"Error creating websocket connection: {e}")
+            raise
+
+    async def send_order_with_timeout(self, order_message, timeout=10):
+        """Send order with timeout and reconnection logic"""
+        start_time = time.time()
+        last_attempt_time = 0
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Ensure minimum delay between attempts
+                current_time = time.time()
+                if current_time - last_attempt_time < 2:
+                    await asyncio.sleep(2)
+                
+                if not self.edit_websocket or self.edit_websocket.state != websockets.protocol.State.OPEN:
+                    print("Reconnecting websocket...")
+                    success = await self.connect_edit_websocket()
+                    if not success:
+                        print("Failed to reconnect websocket")
+                        await asyncio.sleep(1)
+                        continue
+                
+                await self.edit_websocket.send(json.dumps(order_message))
+                
+                # Wait for response with shorter timeout
+                try:
+                    response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=3.0)
+                    response_data = json.loads(response)
+                    
+                    # Skip heartbeat messages
+                    if response_data.get("channel") == "heartbeat":
+                        continue
+                        
+                    return response_data
+                    
+                except asyncio.TimeoutError:
+                    print("Response timeout, retrying...")
+                    last_attempt_time = current_time
+                    continue
+                    
+            except Exception as e:
+                print(f"Error sending order: {e}")
+                last_attempt_time = time.time()
+                await asyncio.sleep(1)
+                continue
+                
+        raise TimeoutError("Operation timed out after multiple attempts")
+
     async def create_grid_orders(self):
         """Create new grid orders if none exist"""
         try:
-            # Double check we don't have active buy orders
             if len(self.active_buy_orders) > 0:
-                print(f"Already have {len(self.active_buy_orders)} active buy orders for {self.symbol}, skipping order creation")
                 return
 
             current_price = await self.kraken_ws.get_ticker_price(self.symbol)
             if not current_price:
-                print(f"Failed to get current price for {self.symbol}")
                 return
 
-            # Calculate grid prices using configured interval
             grid_interval = self.config.grid_interval / 100
             buy_price = round(current_price * (1 - grid_interval), 1)
             sell_price = round(current_price * (1 + grid_interval), 1)
@@ -616,12 +718,14 @@ class MonitorOpenOrders:
 
             order_qty = self.config.trading_pairs.get(self.symbol)
             if not order_qty:
-                print(f"No order quantity configured for {self.symbol}")
                 return
 
-            # Ensure we have a websocket connection
-            if not self.edit_websocket:
-                await self.connect_edit_websocket()
+            # Ensure websocket connection before placing orders
+            if not self.edit_websocket or self.edit_websocket.state != websockets.protocol.State.OPEN:
+                success = await self.connect_edit_websocket()
+                if not success:
+                    print("Failed to connect websocket")
+                    return
 
             async with self.ws_lock:
                 # Place buy order
@@ -640,15 +744,17 @@ class MonitorOpenOrders:
                 }
 
                 print(f"Placing buy order: {buy_order}")
-                await self.edit_websocket.send(json.dumps(buy_order))
-                
-                # Wait for buy order response
-                buy_response = await self.wait_for_order_response("add_order")
-                if not buy_response.get("success"):
-                    print(f"Failed to place buy order: {buy_response.get('error')}")
+                try:
+                    buy_response = await self.send_order_with_timeout(buy_order)
+                    if not buy_response or not buy_response.get("success"):
+                        print(f"Failed to place buy order: {buy_response.get('error') if buy_response else 'No response'}")
+                        return
+                    print(f"Successfully placed buy order at {buy_price}")
+                except TimeoutError:
+                    print("Timeout placing buy order")
                     return
 
-                # Place sell order immediately after successful buy order
+                # Place sell order using the same websocket connection
                 sell_order = {
                     "method": "add_order",
                     "params": {
@@ -664,16 +770,17 @@ class MonitorOpenOrders:
                 }
 
                 print(f"Placing sell order: {sell_order}")
-                await self.edit_websocket.send(json.dumps(sell_order))
-                
-                # Wait for sell order response but ignore insufficient funds error
-                sell_response = await self.wait_for_order_response("add_order")
-                if sell_response.get("success"):
-                    print(f"Successfully placed sell order at {sell_price}")
-                elif sell_response.get("error") == "EOrder:Insufficient funds":
-                    print("Insufficient funds for sell order - continuing normally")
-                else:
-                    print(f"Failed to place sell order: {sell_response.get('error')}")
+                try:
+                    sell_response = await self.send_order_with_timeout(sell_order)
+                    if sell_response and sell_response.get("success"):
+                        print(f"Successfully placed sell order at {sell_price}")
+                    elif sell_response and sell_response.get("error") == "EOrder:Insufficient funds":
+                        print("Insufficient funds for sell order - continuing normally")
+                    else:
+                        error_msg = sell_response.get('error') if sell_response else 'No response'
+                        print(f"Failed to place sell order: {error_msg}")
+                except TimeoutError:
+                    print("Timeout placing sell order - continuing")
 
         except Exception as e:
             print(f"Error creating grid orders for {self.symbol}: {e}")
