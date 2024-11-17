@@ -27,6 +27,14 @@ class KrakenWebsocket:
         self.auth_url = "https://api.kraken.com"
         self.auth_token = None
         self.auth_expiry = None
+        self.rate_counters = {}  # Track rate counter per pair
+        self.last_decay_time = {}  # Track last decay time per pair
+        self.tier_decay_rate = 2.34  # Assuming Intermediate tier (-2.34/second)
+        self.tier_threshold = 125    # Assuming Intermediate tier threshold
+        self.ticker_ws = None
+        self.latest_prices = {}
+        self.price_subscribers = set()
+        self.ticker_initialized = asyncio.Event()
 
     def get_auth_token(self):
         """Generate authentication token for Kraken websocket"""
@@ -70,30 +78,67 @@ class KrakenWebsocket:
             print(f"Failed to create connection to {url}: {str(e)}")
             return None
 
-    async def get_ticker_price(self, symbol: str) -> float:
-        """Get current market price for a symbol"""
-        try:
-            async with await self.create_connection(self.ws_pub_url) as websocket:
+    async def start_ticker_stream(self):
+        """Maintain a single websocket connection for all price updates"""
+        retry_delay = 5
+        
+        while True:
+            try:
+                if self.ticker_ws:
+                    await self.ticker_ws.close()
+                    await asyncio.sleep(1)
+                
+                self.ticker_ws = await websockets.connect(self.ws_pub_url)
+                
+                # Subscribe to all pairs
                 subscribe_msg = {
                     "method": "subscribe",
                     "params": {
                         "channel": "ticker",
-                        "symbol": [symbol]
+                        "symbol": list(self.price_subscribers)
                     }
                 }
-                await websocket.send(json.dumps(subscribe_msg))
+                await self.ticker_ws.send(json.dumps(subscribe_msg))
+                print(f"Subscribed to ticker updates for {self.price_subscribers}")
                 
+                # Process messages
                 while True:
-                    message = await websocket.recv()
+                    message = await self.ticker_ws.recv()
                     msg_data = json.loads(message)
                     
-                    if msg_data.get("channel") == "ticker" and msg_data.get("type") in ["snapshot", "update"]:
-                        ticker_data = msg_data.get("data", [{}])[0]
-                        if ticker_data.get("symbol") == symbol:
-                            return float(ticker_data.get("last", 0))
+                    if msg_data.get("channel") == "ticker":
+                        msg_type = msg_data.get("type")
+                        if msg_type in ["snapshot", "update"]:
+                            ticker_data = msg_data.get("data", [{}])[0]
+                            symbol = ticker_data.get("symbol")
+                            if symbol:
+                                # Get the ask price directly
+                                ask_price = ticker_data.get("ask")
+                                if ask_price and float(ask_price) > 0:
+                                    self.latest_prices[symbol] = float(ask_price)
+                                    print(f"Updated {symbol} price to {ask_price}")
+                                    self.ticker_initialized.set()
                             
-        except Exception as e:
-            print(f"Failed to get ticker price: {str(e)}")
+            except Exception as e:
+                print(f"Ticker stream error: {e}")
+                print(f"Full error details: {traceback.format_exc()}")
+                await asyncio.sleep(retry_delay)
+                self.ticker_initialized.clear()
+
+    def subscribe_to_ticker(self, symbol: str):
+        """Add a symbol to price tracking"""
+        self.price_subscribers.add(symbol)
+
+    async def get_ticker_price(self, symbol: str) -> float:
+        """Get current market price for a symbol from cached data"""
+        try:
+            await asyncio.wait_for(self.ticker_initialized.wait(), timeout=10)
+            price = self.latest_prices.get(symbol)
+            if price:
+                print(f"Got latest {symbol} price: {price}")
+            return price
+        except asyncio.TimeoutError:
+            print(f"Timeout waiting for ticker initialization")
             return None
 
     async def create_websocket_connection(self):
@@ -127,6 +172,47 @@ class KrakenWebsocket:
         except Exception as e:
             print(f"Error creating websocket connection: {e}")
             raise
+
+    def update_rate_counter(self, symbol: str, action: str, order_age: float = None):
+        """
+        Update rate counter for a symbol based on action and order age
+        Returns True if action is allowed, False if rate limit would be exceeded
+        """
+        current_time = time.time()
+        
+        # Initialize counters if needed
+        if symbol not in self.rate_counters:
+            self.rate_counters[symbol] = 0
+            self.last_decay_time[symbol] = current_time
+        
+        # Apply decay since last update
+        time_diff = current_time - self.last_decay_time[symbol]
+        decay = self.tier_decay_rate * time_diff
+        self.rate_counters[symbol] = max(0, self.rate_counters[symbol] - decay)
+        self.last_decay_time[symbol] = current_time
+
+        # Calculate increment based on action and order age
+        increment = 1  # Fixed count for add/amend
+        if order_age:
+            if action == "amend":
+                if order_age < 5: increment += 3
+                elif order_age < 10: increment += 2
+                elif order_age < 15: increment += 1
+            elif action == "cancel":
+                if order_age < 5: increment += 8
+                elif order_age < 10: increment += 6
+                elif order_age < 15: increment += 5
+                elif order_age < 45: increment += 4
+                elif order_age < 90: increment += 2
+                elif order_age < 300: increment += 1
+
+        # Check if action would exceed threshold
+        if (self.rate_counters[symbol] + increment) > self.tier_threshold:
+            return False
+
+        # Apply increment
+        self.rate_counters[symbol] += increment
+        return True
 
 class BotConfiguration:
     """Class for handling grid trading bot configuration"""
@@ -213,14 +299,28 @@ class MonitorOpenOrders:
         self.initial_snapshot_processed = False
 
     async def connect_edit_websocket(self):
-        """Create separate websocket connection for order modifications"""
-        if not self.edit_websocket:
+        """Create separate websocket connection for order modifications with retry logic"""
+        max_retries = 5
+        retry_delay = 5  # seconds
+
+        for attempt in range(max_retries):
             try:
+                if self.edit_websocket:
+                    try:
+                        await self.edit_websocket.close()
+                    except:
+                        pass
+                
                 self.edit_websocket = await self.kraken_ws.create_websocket_connection()
                 print(f"Created edit websocket connection for {self.symbol}")
+                return
+                
             except Exception as e:
-                print(f"Failed to create edit websocket for {self.symbol}: {e}")
-                raise
+                print(f"Attempt {attempt + 1}/{max_retries} failed to create edit websocket for {self.symbol}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                else:
+                    raise
 
     async def grid_interval_exceeded_update(self):
         """Monitor and adjust buy orders that exceed grid interval threshold"""
@@ -235,7 +335,7 @@ class MonitorOpenOrders:
                     continue
 
                 # Calculate the optimal grid price
-                grid_interval = self.config.grid_interval / 100  # Convert 0.8% to 0.008
+                grid_interval = self.config.grid_interval / 100
                 optimal_price = round(current_price * (1 - grid_interval), 1)
                 
                 print(f"\nChecking grid intervals for {self.symbol}:")
@@ -243,27 +343,25 @@ class MonitorOpenOrders:
                 print(f"Optimal Grid Price: {optimal_price}")
                 print(f"Active Buy Orders: {self.active_buy_orders}")
 
-                # Create a copy of active_buy_orders to avoid modification during iteration
                 orders_to_check = self.active_buy_orders.copy()
                 
                 for order_id, execution_price in orders_to_check.items():
                     execution_price = float(execution_price)
-                    print(f"Checking order {order_id} at price {execution_price}")
-
+                    
                     # Calculate percentage difference from current price
                     price_diff_pct = ((current_price - execution_price) / current_price) * 100
-                    print(f"Price difference: {price_diff_pct:.2f}%")
+                    print(f"Order {order_id} price difference: {price_diff_pct:.2f}%")
                     
-                    # If price difference deviates from target 0.8% by more than 0.02%
-                    if abs(price_diff_pct - 0.8) > 0.02:  # Tightened threshold
-                        print(f"Order {order_id} needs adjustment - Current diff: {price_diff_pct:.2f}%, Target: 0.8%")
-                        print(f"Current execution price: {execution_price}")
-                        print(f"New grid price: {optimal_price}")
+                    target = self.config.grid_interval  # e.g., 0.8%
+                    buffer = 0.01  # 0.1% buffer
+                    
+                    # Only adjust if the difference is GREATER than target + buffer
+                    if price_diff_pct > (target + buffer):
+                        print(f"Order {order_id} needs adjustment - Current diff: {price_diff_pct:.2f}% exceeds target: {target}% + {buffer}%")
                         
                         # Only modify if the new price is meaningfully different
                         if abs(optimal_price - execution_price) > 0.1:
                             try:
-                                # Use the amend_order endpoint
                                 modify_message = {
                                     "method": "amend_order",
                                     "params": {
@@ -312,9 +410,9 @@ class MonitorOpenOrders:
                                 # Reconnect websocket on error
                                 await self.connect_edit_websocket()
                     else:
-                        print(f"Order {order_id} price {execution_price} is within target range (0.8% from current price)")
+                        print(f"Order {order_id} price difference ({price_diff_pct:.2f}%) is within acceptable range of target ({target}% ±{buffer}%)")
 
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
 
             except Exception as e:
                 print(f"Error in grid_interval_exceeded_update for {self.symbol}: {e}")
@@ -538,15 +636,19 @@ class MonitorOpenOrders:
         """Print the current active buy orders"""
         print(f"Active Buy Orders for {self.symbol}: {self.active_buy_orders}")
 
-    async def modify_order(self, order_id: str, new_price: float) -> bool:
-        """Send order modification request using amend_order endpoint"""
+    async def modify_order(self, order_id: str, new_price: float, order_age: float) -> bool:
+        """Send order modification request with rate limiting"""
         try:
-            # Format according to the WebSocket API v2 spec
+            if not self.kraken_ws.update_rate_counter(self.symbol, "amend", order_age):
+                print(f"Rate limit would be exceeded for {self.symbol}, waiting for decay...")
+                await asyncio.sleep(5)  # Wait for decay
+                return False
+
             modify_message = {
-                "method": "amend_order",  # Changed from editOrder to amend_order
+                "method": "amend_order",
                 "params": {
                     "order_id": order_id,
-                    "limit_price": float(new_price),  # Must be float
+                    "limit_price": float(new_price),
                     "token": self.kraken_ws.get_auth_token()
                 }
             }
@@ -582,7 +684,7 @@ class MonitorOpenOrders:
             return False
 
 async def main():
-    # Example configuration with multiple pairs
+    # Initialize everything
     config = BotConfiguration(
         trading_pairs={
             "BTC/USD": 0.0001,
@@ -593,40 +695,46 @@ async def main():
     
     kraken_ws = KrakenWebsocket()
     
-    # Print overall configuration first
-    print("\n=== Grid Trading Bot Configuration ===")
-    for symbol, qty in config.trading_pairs.items():
-        print(f"Symbol: {symbol:<10} | Order Quantity: {qty}")
-    print(f"Grid Interval: {config.grid_interval}%\n")
-    
-    # Initialize monitors for each trading pair
-    monitors = []
-    
-    # Print grid levels and current prices
-    print("=== Grid Levels and Current Prices ===")
+    # Subscribe to all pairs upfront
     for symbol in config.trading_pairs:
-        current_price = await kraken_ws.get_ticker_price(symbol)
-        if not current_price:
-            print(f"Failed to get current market price for {symbol}. Skipping.")
-            continue
-            
-        buy_prices, sell_prices = config.calculate_grid_prices(current_price)
-        
-        print(f"\n{symbol}:")
-        print(f"Buy Grid Levels:  {buy_prices}")
-        print(f"Current Price:    {current_price}")
-        print(f"Sell Grid Levels: {sell_prices}")
-        
-        # Initialize monitor with grid information and symbol
-        monitor = MonitorOpenOrders(kraken_ws, config, symbol)
-        monitor.current_price = current_price
-        monitor.buy_grid_prices = buy_prices
-        monitor.sell_grid_prices = sell_prices
-        monitors.append(monitor)
+        kraken_ws.subscribe_to_ticker(symbol)
     
-    print("\n=== Starting Order Monitoring ===")
-    # Run all monitors concurrently
-    await asyncio.gather(*(monitor.monitor() for monitor in monitors))
+    # Start ticker stream and wait for initial data
+    ticker_task = asyncio.create_task(kraken_ws.start_ticker_stream())
+    try:
+        await asyncio.wait_for(kraken_ws.ticker_initialized.wait(), timeout=30)
+    except asyncio.TimeoutError:
+        print("Failed to initialize ticker stream")
+        return
+
+    # Initialize monitors
+    monitors = [MonitorOpenOrders(kraken_ws, config, symbol) for symbol in config.trading_pairs]
+    
+    async def check_all_pairs():
+        """Check and update all trading pairs sequentially"""
+        while True:
+            for symbol in config.trading_pairs:
+                try:
+                    current_price = await kraken_ws.get_ticker_price(symbol)
+                    if not current_price:
+                        print(f"Failed to get current price for {symbol}")
+                        await asyncio.sleep(5)
+                        continue
+                    
+                    # ... rest of the pair checking logic ...
+                    
+                except Exception as e:
+                    print(f"Error processing {symbol}: {e}")
+                    print(f"Full error details: {traceback.format_exc()}")
+                
+            await asyncio.sleep(5)
+    
+    # Start all tasks
+    await asyncio.gather(
+        ticker_task,
+        check_all_pairs(),
+        *(monitor.monitor() for monitor in monitors)
+    )
 
 if __name__ == "__main__":
     try:
