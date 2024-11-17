@@ -73,7 +73,66 @@ Run the bot by executing the script:
 python diogrid.py
 ```
 
-Will be adding a docker file soon.
+
+## Running Persistently in Background via Docker
+
+After setting up your `.env` file:
+
+1. **Build the Docker Image**  
+   Run the following command in the terminal to build the Docker image:
+
+   ```bash
+   docker build -t diogrid_container .
+   ```
+
+2. **Run the Docker Container in the Background**  
+   To run the container persistently in the background, use the `-d` flag:
+
+   ```bash
+   docker run -d --name diogrid_container --env-file .env diogrid_container
+   ```
+
+   - The `--env-file .env` option ensures that environment variables from your `.env` file are loaded into the container.
+
+3. **Verify the Container is Running**  
+   You can check the status of your container by running:
+
+   ```bash
+   docker ps
+   ```
+
+   This will list all running containers. Ensure your container is listed with its name and status as `Up`.
+
+4. **View Logs**  
+   If you need to monitor logs, you can view them in real time by running:
+
+   ```bash
+   docker logs -f diogrid_container
+   ```
+
+5. **Stop the Container**  
+   To stop the container when needed, use:
+
+   ```bash
+   docker stop diogrid_container
+   ```
+
+6. **Restart the Container**  
+   If you want to restart the container later without rebuilding, run:
+
+   ```bash
+   docker start diogrid_container
+   ```
+
+7. **Remove the Container**  
+   If you want to delete the container, first stop it (if running), then remove it:
+
+   ```bash
+   docker rm diogrid_container
+   ```
+
+Now your Docker container should run persistently in the background, ensuring the bot is always running.
+
 
 ### Key Features and Parameters:
 
