@@ -1,4 +1,3 @@
-websockets
-asyncio
 requests
 python-dotenv
+numpy
