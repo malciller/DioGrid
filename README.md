@@ -85,7 +85,10 @@ After setting up your `.env` file:
    docker build -t diogrid_container .
    ```
 
-2. **Run the Docker Container in the Background**  
+2. **Run the Docker Container in the Background**
+
+   For instructions on setting up docker please visit: https://www.docker.com/get-started/
+   
    To run the container persistently in the background, use the `-d` flag:
 
    ```bash
@@ -94,7 +97,7 @@ After setting up your `.env` file:
 
    - The `--env-file .env` option ensures that environment variables from your `.env` file are loaded into the container.
 
-3. **Verify the Container is Running**  
+4. **Verify the Container is Running**  
    You can check the status of your container by running:
 
    ```bash
@@ -103,28 +106,28 @@ After setting up your `.env` file:
 
    This will list all running containers. Ensure your container is listed with its name and status as `Up`.
 
-4. **View Logs**  
+5. **View Logs**  
    If you need to monitor logs, you can view them in real time by running:
 
    ```bash
    docker logs -f diogrid_container
    ```
 
-5. **Stop the Container**  
+6. **Stop the Container**  
    To stop the container when needed, use:
 
    ```bash
    docker stop diogrid_container
    ```
 
-6. **Restart the Container**  
+7. **Restart the Container**  
    If you want to restart the container later without rebuilding, run:
 
    ```bash
    docker start diogrid_container
    ```
 
-7. **Remove the Container**  
+8. **Remove the Container**  
    If you want to delete the container, first stop it (if running), then remove it:
 
    ```bash
