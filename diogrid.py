@@ -568,16 +568,25 @@ class MonitorOpenOrders:
             print(f"Placing buy order: {buy_order}")
             await self.edit_websocket.send(json.dumps(buy_order))
             
-            # Wait for and process buy order response
-            buy_response = await self.wait_for_order_response("add_order")
-            if buy_response.get("success"):
-                order_id = buy_response.get("result", {}).get("order_id")
-                if order_id:
-                    self.active_buy_orders[order_id] = buy_price
-                    print(f"Successfully placed buy order: {order_id}")
-                    print(f"Updated active buy orders: {self.active_buy_orders}")
-            else:
-                print(f"Failed to place buy order: {buy_response.get('error')}")
+            # Wait for and process buy order response with retries
+            max_retries = 3
+            for attempt in range(max_retries):
+                buy_response = await self.wait_for_order_response("add_order")
+                if buy_response.get("success"):
+                    order_id = buy_response.get("result", {}).get("order_id")
+                    if order_id:
+                        self.active_buy_orders[order_id] = buy_price
+                        print(f"Successfully placed buy order {order_id} at {buy_price}")
+                        break
+                else:
+                    error = buy_response.get("error", "Unknown error")
+                    print(f"Attempt {attempt + 1}/{max_retries}: Failed to place buy order: {error}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        print("Max retries reached for buy order placement")
+                        return
 
             # Place sell order
             sell_order = {
@@ -597,12 +606,23 @@ class MonitorOpenOrders:
             print(f"Placing sell order: {sell_order}")
             await self.edit_websocket.send(json.dumps(sell_order))
             
-            # Wait for and process sell order response
-            sell_response = await self.wait_for_order_response("add_order")
-            if sell_response.get("success"):
-                print(f"Successfully placed sell order: {sell_response.get('result', {}).get('order_id')}")
-            else:
-                print(f"Failed to place sell order: {sell_response.get('error')}")
+            # Wait for and process sell order response with retries
+            for attempt in range(max_retries):
+                sell_response = await self.wait_for_order_response("add_order")
+                if sell_response.get("success"):
+                    order_id = sell_response.get("result", {}).get("order_id")
+                    print(f"Successfully placed sell order {order_id} at {sell_price}")
+                    break
+                else:
+                    error = sell_response.get("error", "Unknown error")
+                    print(f"Attempt {attempt + 1}/{max_retries}: Failed to place sell order: {error}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        print("Max retries reached for sell order placement")
+
+            print(f"Updated active buy orders for {self.symbol}: {self.active_buy_orders}")
 
         except Exception as e:
             print(f"Error creating grid orders for {self.symbol}: {e}")
@@ -713,6 +733,8 @@ class MonitorOpenOrders:
     async def wait_for_order_response(self, expected_method: str, timeout: int = 10) -> dict:
         """Wait for specific order response"""
         start_time = time.time()
+        response_data = None  # Initialize outside try block
+        
         while time.time() - start_time < timeout:
             try:
                 response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=2.0)
@@ -737,9 +759,14 @@ class MonitorOpenOrders:
                     
             except asyncio.TimeoutError:
                 continue
+            except websockets.exceptions.ConcurrencyError:
+                print("Concurrent websocket access detected, retrying...")
+                await asyncio.sleep(0.5)  # Add small delay before retry
+                continue
             except Exception as e:
                 print(f"Error processing response: {e}")
-                print(f"Response data: {response_data}")
+                if response_data:  # Only print if we have data
+                    print(f"Response data: {response_data}")
                 continue
         
         return {"success": False, "error": "Timeout waiting for response"}
