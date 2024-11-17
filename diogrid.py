@@ -38,6 +38,7 @@ class KrakenWebsocket:
         self.ticker_initialized = asyncio.Event()
         self.price_queue = asyncio.Queue()
         self.order_queue = asyncio.Queue()
+        self.ws_lock = asyncio.Lock()  # Add lock for websocket access
 
     def get_auth_token(self):
         """Generate authentication token for Kraken websocket"""
@@ -324,6 +325,7 @@ class MonitorOpenOrders:
     """Class for monitoring open orders via WebSocket"""
     
     def __init__(self, kraken_ws, config: BotConfiguration, symbol: str):
+        """Initialize monitor"""
         self.kraken_ws = kraken_ws
         self.config = config
         self.symbol = symbol
@@ -331,6 +333,7 @@ class MonitorOpenOrders:
         self.edit_websocket = None  # Separate websocket for order modifications
         self.active_buy_orders = {}  # Track active buy orders
         self.initial_snapshot_processed = False
+        self.ws_lock = asyncio.Lock() 
 
     async def connect_edit_websocket(self):
         """Create separate websocket connection for order modifications with retry logic"""
@@ -550,77 +553,61 @@ class MonitorOpenOrders:
             if not self.edit_websocket:
                 await self.connect_edit_websocket()
 
-            # Place buy order
-            buy_order = {
-                "method": "add_order",
-                "params": {
-                    "order_type": "limit",
-                    "side": "buy",
-                    "order_qty": order_qty,
-                    "symbol": self.symbol,
-                    "limit_price": buy_price,
-                    "time_in_force": "gtc",
-                    "post_only": True,
-                    "token": self.kraken_ws.get_auth_token()
+            async with self.ws_lock:  # Use lock for sending messages
+                # Place buy order
+                buy_order = {
+                    "method": "add_order",
+                    "params": {
+                        "order_type": "limit",
+                        "side": "buy",
+                        "order_qty": order_qty,
+                        "symbol": self.symbol,
+                        "limit_price": buy_price,
+                        "time_in_force": "gtc",
+                        "post_only": True,
+                        "token": self.kraken_ws.get_auth_token()
+                    }
                 }
-            }
 
-            print(f"Placing buy order: {buy_order}")
-            await self.edit_websocket.send(json.dumps(buy_order))
-            
-            # Wait for and process buy order response with retries
-            max_retries = 3
-            for attempt in range(max_retries):
+                print(f"Placing buy order: {buy_order}")
+                await self.edit_websocket.send(json.dumps(buy_order))
+                
+                # Wait for buy order response
                 buy_response = await self.wait_for_order_response("add_order")
                 if buy_response.get("success"):
                     order_id = buy_response.get("result", {}).get("order_id")
                     if order_id:
                         self.active_buy_orders[order_id] = buy_price
                         print(f"Successfully placed buy order {order_id} at {buy_price}")
-                        break
                 else:
-                    error = buy_response.get("error", "Unknown error")
-                    print(f"Attempt {attempt + 1}/{max_retries}: Failed to place buy order: {error}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(2)
-                        continue
-                    else:
-                        print("Max retries reached for buy order placement")
-                        return
+                    print(f"Failed to place buy order: {buy_response.get('error')}")
+                    return
 
-            # Place sell order
-            sell_order = {
-                "method": "add_order",
-                "params": {
-                    "order_type": "limit",
-                    "side": "sell",
-                    "order_qty": order_qty,
-                    "symbol": self.symbol,
-                    "limit_price": sell_price,
-                    "time_in_force": "gtc",
-                    "post_only": True,
-                    "token": self.kraken_ws.get_auth_token()
+                # Place sell order
+                sell_order = {
+                    "method": "add_order",
+                    "params": {
+                        "order_type": "limit",
+                        "side": "sell",
+                        "order_qty": order_qty,
+                        "symbol": self.symbol,
+                        "limit_price": sell_price,
+                        "time_in_force": "gtc",
+                        "post_only": True,
+                        "token": self.kraken_ws.get_auth_token()
+                    }
                 }
-            }
 
-            print(f"Placing sell order: {sell_order}")
-            await self.edit_websocket.send(json.dumps(sell_order))
-            
-            # Wait for and process sell order response with retries
-            for attempt in range(max_retries):
+                print(f"Placing sell order: {sell_order}")
+                await self.edit_websocket.send(json.dumps(sell_order))
+                
+                # Wait for sell order response
                 sell_response = await self.wait_for_order_response("add_order")
                 if sell_response.get("success"):
                     order_id = sell_response.get("result", {}).get("order_id")
                     print(f"Successfully placed sell order {order_id} at {sell_price}")
-                    break
                 else:
-                    error = sell_response.get("error", "Unknown error")
-                    print(f"Attempt {attempt + 1}/{max_retries}: Failed to place sell order: {error}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(2)
-                        continue
-                    else:
-                        print("Max retries reached for sell order placement")
+                    print(f"Failed to place sell order: {sell_response.get('error')}")
 
             print(f"Updated active buy orders for {self.symbol}: {self.active_buy_orders}")
 
@@ -731,45 +718,40 @@ class MonitorOpenOrders:
             return False
 
     async def wait_for_order_response(self, expected_method: str, timeout: int = 10) -> dict:
-        """Wait for specific order response"""
-        start_time = time.time()
-        response_data = None  # Initialize outside try block
-        
-        while time.time() - start_time < timeout:
-            try:
-                response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=2.0)
-                response_data = json.loads(response)
-                
-                # Skip heartbeat messages
-                if response_data.get("channel") == "heartbeat":
-                    continue
-                
-                # For order amendments, we need to check both method and status
-                if expected_method == "amend_order":
-                    if (response_data.get("method") == "amend_order" or 
-                        response_data.get("type") == "amendment"):
-                        return {
-                            "success": True if not response_data.get("error") else False,
-                            "error": response_data.get("error"),
-                            "result": response_data.get("result", {})
-                        }
-                # For new orders
-                elif response_data.get("method") == expected_method:
-                    return response_data
+        """Wait for specific order response with lock protection"""
+        async with self.ws_lock:  # Use lock to prevent concurrent access
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                try:
+                    response = await asyncio.wait_for(self.edit_websocket.recv(), timeout=2.0)
+                    response_data = json.loads(response)
                     
-            except asyncio.TimeoutError:
-                continue
-            except websockets.exceptions.ConcurrencyError:
-                print("Concurrent websocket access detected, retrying...")
-                await asyncio.sleep(0.5)  # Add small delay before retry
-                continue
-            except Exception as e:
-                print(f"Error processing response: {e}")
-                if response_data:  # Only print if we have data
-                    print(f"Response data: {response_data}")
-                continue
-        
-        return {"success": False, "error": "Timeout waiting for response"}
+                    # Skip heartbeat messages
+                    if response_data.get("channel") == "heartbeat":
+                        continue
+                    
+                    # For order amendments
+                    if expected_method == "amend_order":
+                        if (response_data.get("method") == "amend_order" or 
+                            response_data.get("type") == "amendment"):
+                            return {
+                                "success": True if not response_data.get("error") else False,
+                                "error": response_data.get("error"),
+                                "result": response_data.get("result", {})
+                            }
+                    # For new orders
+                    elif response_data.get("method") == expected_method:
+                        return response_data
+                        
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    print(f"Error in wait_for_order_response: {e}")
+                    await asyncio.sleep(0.5)
+                    continue
+            
+            return {"success": False, "error": "Timeout waiting for response"}
 
 async def main():
     # Initialize everything
