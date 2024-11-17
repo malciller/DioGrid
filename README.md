@@ -50,7 +50,7 @@ KRAKEN_API_SECRET=<your_api_secret>
 
 ### 4. Update Configuration in the Script
 
-All configuration (e.g., trading pairs, grid intervals, and API details) is managed directly within `diogrid.py` at the top of the main method declaration. Modify the following sections to fit your trading preferences:
+All configuration (e.g., trading pairs, grid intervals, and API details) is managed directly within `diogrid.py` at the top of the main method declaration. Modify the following sections to fit your trading preferences. Please note that the Kraken minimum order volume threshold must be respected. For minimum order volumes, please visit: https://support.kraken.com/hc/en-us/articles/205893708-Minimum-order-size-volume-for-trading:
 
 #### Example Configuration in `diogrid.py`:
 ```python
