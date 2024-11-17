@@ -76,6 +76,8 @@ python diogrid.py
 
 ## Running Persistently in Background via Docker
 
+For instructions on setting up docker please visit: https://www.docker.com/get-started/
+
 After setting up your `.env` file:
 
 1. **Build the Docker Image**  
@@ -86,8 +88,6 @@ After setting up your `.env` file:
    ```
 
 2. **Run the Docker Container in the Background**
-
-   For instructions on setting up docker please visit: https://www.docker.com/get-started/
    
    To run the container persistently in the background, use the `-d` flag:
 
