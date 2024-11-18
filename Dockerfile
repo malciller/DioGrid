@@ -32,6 +32,12 @@ USER appuser
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV DOTENV_PATH=/app/.env
+
+# Add a healthcheck
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
 
 # Run the application with logging
-CMD ["python", "-u", "diogrid.py"]
+CMD ["sh", "-c", "python -u diogrid.py 2>&1 | tee -a /app/logs/app.log"]
