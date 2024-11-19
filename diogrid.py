@@ -13,16 +13,19 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+PROFIT_USD_TARGET = 0.01
+KRAKEN_FEE = 0.002
 STARTING_PORTFOLIO_INVESTMENT = 500.0
 PROFIT_INCREMENT = 5
-GRID_INTERVAL = 0.8
-GRID_INTERVAL_GRACE = 0.1
+GRID_INTERVAL = 0.6
+GRID_INTERVAL_GRACE = 0.05
 TRADING_PAIRS = {
-    "BTC/USD": 0.0001,
-    "SOL/USD": 0.04
+    "BTC/USD": 0.0001
+    #"SOL/USD": 0.04
 }
 SHORT_SLEEP_TIME = 0.1
 LONG_SLEEP_TIME = 3
+
 
 
 load_dotenv()
@@ -959,7 +962,8 @@ class KrakenGridBot:
         self.email_manager = EmailManager()
         self.grid_settings = {
             pair: {
-                'min_order_size': size,
+                'buy_order_size': size,
+                'sell_order_size': size,
                 'grid_interval': GRID_INTERVAL,  # Percentage between grid lines
                 'active_orders': set()  # Track order IDs for this grid
             }
@@ -1179,7 +1183,7 @@ class KrakenGridBot:
                 "params": {
                     "order_id": order['order_id'],
                     "limit_price": float(formatted_price),
-                    "order_qty": float(order.get('order_qty', self.grid_settings[trading_pair]['min_order_size'])),
+                    "order_qty": float(order.get('order_qty', self.grid_settings[trading_pair]['buy_order_size'])),
                     "symbol": trading_pair,
                     "side": order.get('side', 'buy'),  # Include original side
                     "order_type": order.get('order_type', 'limit'),  # Include original order type
@@ -1221,7 +1225,6 @@ class KrakenGridBot:
     async def place_orders(self, trading_pair: str):
         """Execute the trade strategy for a trading pair."""
         print(f"Executing trade strategy for {trading_pair}")
-        # Get current ticker data
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
             print(f"No ticker data available for {trading_pair}")
@@ -1229,12 +1232,25 @@ class KrakenGridBot:
         
         current_price = float(ticker['last'])
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
-        min_order_size = self.grid_settings[trading_pair]['min_order_size']
+        
+        # Get buy amount from TRADING_PAIRS
+        buy_amount = TRADING_PAIRS[trading_pair]
+        
+        # Calculate optimal sell amount
+        sell_amount = await self.calculate_optimal_sell_amount(
+            trading_pair, 
+            buy_amount, 
+            current_price
+        )
+        
+        if sell_amount is None:
+            print(f"Skipping orders for {trading_pair} - cannot achieve minimum profit")
+            return
         
         # Calculate grid prices
         interval_amount = current_price * (grid_interval / 100)
         buy_price = current_price - interval_amount
-        sell_price = current_price + interval_amount  # Add sell price calculation
+        sell_price = current_price + interval_amount
         
         # Format prices to appropriate decimal places
         buy_price = float(f"{buy_price:.1f}")
@@ -1244,21 +1260,23 @@ class KrakenGridBot:
             # Generate request ID for buy order
             buy_req_id = int(time.time() * 1000)
             
-            # Place buy order
+            # Place buy order with correct buy_size
             buy_order_msg = {
                 "method": "add_order",
                 "params": {
                     "order_type": "limit",
                     "side": "buy",
                     "symbol": trading_pair,
-                    "order_qty": min_order_size,
+                    "order_qty": buy_amount,  # Use the correct buy size
                     "limit_price": buy_price,
                     "token": await self.client.get_ws_token()
                 },
                 "req_id": buy_req_id
             }
             
-            print(f"ORDER: Placing buy order for {trading_pair}, Current price: ${current_price:.2f}, Grid interval: ${interval_amount:.2f}, Buy price: ${buy_price:.2f}, Quantity: {min_order_size}")
+            print(f"ORDER: Placing buy order for {trading_pair}, Current price: ${current_price:.2f}, "
+                  f"Grid interval: ${interval_amount:.2f}, Buy price: ${buy_price:.2f}, "
+                  f"Buy quantity: {buy_amount}")
             
             # Send buy order and wait for response
             await self.client.websocket.send(json.dumps(buy_order_msg))
@@ -1282,14 +1300,15 @@ class KrakenGridBot:
                                 "order_type": "limit",
                                 "side": "sell",
                                 "symbol": trading_pair,
-                                "order_qty": min_order_size,
+                                "order_qty": sell_amount,  # Use the correct sell size
                                 "limit_price": sell_price,
                                 "token": await self.client.get_ws_token()
                             },
                             "req_id": sell_req_id
                         }
                         
-                        print(f"ORDER: Placing corresponding sell order, Sell price: ${sell_price:.2f}")
+                        print(f"ORDER: Placing corresponding sell order, Sell price: ${sell_price:.2f}, "
+                              f"Sell quantity: {sell_amount}")
                         
                         await self.client.websocket.send(json.dumps(sell_order_msg))
                         # We don't track the response for sell orders
@@ -1306,16 +1325,73 @@ class KrakenGridBot:
         except Exception as e:
             print(f"Error placing orders for {trading_pair}: {str(e)}")
 
+    """
+    Calculates the optimal sell amount to ensure minimum profit after fees.
+    
+    Args:
+        trading_pair (str): Trading pair symbol
+        buy_amount (float): Buy amount for the trading pair
+        current_price (float): Current price of the trading pair
+        
+    Returns:
+        float: Optimal sell amount
+    """
+    async def calculate_optimal_sell_amount(self, trading_pair: str, buy_amount: float, current_price: float) -> float:
+        """Calculate the optimal sell amount to ensure minimum profit after fees."""
+        grid_interval = self.grid_settings[trading_pair]['grid_interval']
+        interval_amount = current_price * (grid_interval / 100)
+        
+        # Calculate prices
+        buy_price = current_price - ((current_price * GRID_INTERVAL_GRACE)/100)
+        sell_price = current_price + interval_amount
+        
+        # Calculate total cost of buy (including fees)
+        buy_cost = buy_amount * buy_price
+        buy_fee = buy_cost * KRAKEN_FEE
+        total_buy_cost = buy_cost + buy_fee
+        
+        # Calculate how much asset we need to sell to cover costs and PROFIT_USD_TARGET
+        # Formula: (total_buy_cost + PROFIT_USD_TARGET) / (sell_price * (1 - KRAKEN_FEE))
+        required_sell_amount = (total_buy_cost + PROFIT_USD_TARGET) / (sell_price * (1 - KRAKEN_FEE))
+        
+        # Round to appropriate decimal places
+        decimals = 8 if trading_pair.startswith('BTC') else 5
+        optimal_sell_amount = round(required_sell_amount, decimals)
+        
+        # If required sell amount exceeds buy amount, sell entire buy amount
+        if required_sell_amount > buy_amount:
+            print(f"Warning: Required sell amount ({required_sell_amount}) exceeds buy amount ({buy_amount})")
+            print("Will sell entire buy amount")
+            optimal_sell_amount = buy_amount
+        
+        # Calculate actual profit with final sell amount
+        sell_revenue = optimal_sell_amount * sell_price
+        sell_fee = sell_revenue * KRAKEN_FEE
+        actual_profit = sell_revenue - sell_fee - total_buy_cost
+        asset_kept = buy_amount - optimal_sell_amount
+        
+        print(f"\nCalculated optimal sell amount for {trading_pair}:")
+        print(f"Buy amount: {buy_amount}")
+        print(f"Buy price: ${buy_price:.2f}")
+        print(f"Sell price: ${sell_price:.2f}")
+        print(f"Total buy cost (inc. fee): ${total_buy_cost:.4f}")
+        print(f"Amount needed to sell: {optimal_sell_amount}")
+        print(f"Amount kept: {asset_kept}")
+        print(f"Expected profit: ${actual_profit:.4f}")
+        print(f"Total fees: ${(buy_fee + sell_fee):.4f}")
+        
+        return optimal_sell_amount
+
 
 class EmailManager:
     """Handles email notifications for the trading bot."""
     
     def __init__(self):
-        self.sender_email = "admin@diophantsolutions.com"
-        self.receiver_email = "malciller@gmail.com"
-        self.app_password = "shcr gtcb oslo dhxu"
-        self.smtp_server = "smtp.gmail.com"
-        self.smtp_port = 587
+        self.sender_email = os.getenv("SENDER_EMAIL")
+        self.receiver_email = os.getenv("RECEIVER_EMAIL") 
+        self.app_password = os.getenv("EMAIL_APP_PASSWORD")
+        self.smtp_server = os.getenv("SMTP_SERVER")
+        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
         self.last_notification_time = {}  # Track last notification time per type
         
     """
