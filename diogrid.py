@@ -13,18 +13,24 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-PROFIT_USD_TARGET = 0.01
+PROFIT_USD_TARGET = 0.02
 KRAKEN_FEE = 0.002
 STARTING_PORTFOLIO_INVESTMENT = 500.0
 PROFIT_INCREMENT = 5
-GRID_INTERVAL = 0.6
 GRID_INTERVAL_GRACE = 0.05
 TRADING_PAIRS = {
-    "BTC/USD": 0.0001
-    #"SOL/USD": 0.04
+    "BTC/USD": {
+        'size': 0.0001,
+        'grid_interval': 0.75
+    },
+    "SOL/USD": {
+        'size': 0.04,
+        'grid_interval': 2.0
+    },
 }
 SHORT_SLEEP_TIME = 0.1
 LONG_SLEEP_TIME = 3
+GRID_DECAY_TIME = 5  # 5 second decay time
 
 
 
@@ -962,12 +968,13 @@ class KrakenGridBot:
         self.email_manager = EmailManager()
         self.grid_settings = {
             pair: {
-                'buy_order_size': size,
-                'sell_order_size': size,
-                'grid_interval': GRID_INTERVAL,  # Percentage between grid lines
-                'active_orders': set()  # Track order IDs for this grid
+                'buy_order_size': settings['size'],
+                'sell_order_size': settings['size'],
+                'grid_interval': settings['grid_interval'],  # Now using per-asset grid interval
+                'active_orders': set(),  # Track order IDs for this grid
+                'last_order_time': 0  # Add tracking for last order time
             }
-            for pair, size in TRADING_PAIRS.items()
+            for pair, settings in TRADING_PAIRS.items()
         }
         self.grid_orders = {
             pair: {'buy': None, 'sell': None} 
@@ -1110,8 +1117,6 @@ class KrakenGridBot:
     """
     async def check_open_orders_open_order_interval(self, trading_pair: str, open_order: dict):
         """Check if an open order is still within the grid interval."""
-        #print(f"Checking open order interval for {trading_pair}")
-        
         if not open_order:
             print(f"No open order provided for {trading_pair}")
             return False
@@ -1131,7 +1136,7 @@ class KrakenGridBot:
             print(f"Could not determine limit price for order {open_order['order_id']}")
             return False
 
-        # Calculate grid parameters
+        # Calculate grid parameters using asset-specific interval
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
         interval_amount = current_market_price * ((grid_interval + GRID_INTERVAL_GRACE) / 100)
         
@@ -1224,17 +1229,29 @@ class KrakenGridBot:
     """
     async def place_orders(self, trading_pair: str):
         """Execute the trade strategy for a trading pair."""
+        # Check decay timer
+        current_time = time.time()
+        last_order_time = self.grid_settings[trading_pair]['last_order_time']
+        
+        if current_time - last_order_time < GRID_DECAY_TIME:
+            time_left = GRID_DECAY_TIME - (current_time - last_order_time)
+            print(f"Decay timer active for {trading_pair}. {time_left:.1f}s remaining")
+            return
+            
         print(f"Executing trade strategy for {trading_pair}")
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
             print(f"No ticker data available for {trading_pair}")
             return
         
+        # Update last order time before placing orders
+        self.grid_settings[trading_pair]['last_order_time'] = current_time
+        
         current_price = float(ticker['last'])
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
         
         # Get buy amount from TRADING_PAIRS
-        buy_amount = TRADING_PAIRS[trading_pair]
+        buy_amount = TRADING_PAIRS[trading_pair]['size']
         
         # Calculate optimal sell amount
         sell_amount = await self.calculate_optimal_sell_amount(

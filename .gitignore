@@ -18,3 +18,4 @@ logs/
 #ignore supporting .py scripts
 p_cancel.py
 cron.py
+calc.py
