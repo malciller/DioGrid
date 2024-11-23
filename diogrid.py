@@ -13,7 +13,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-PROFIT_USD_TARGET = 0.05
 KRAKEN_FEE = 0.002
 STARTING_PORTFOLIO_INVESTMENT = 500.0
 PROFIT_INCREMENT = 5
@@ -21,17 +20,20 @@ TRADING_PAIRS = {
     "BTC/USD": {
         'size': 0.00011,
         'grid_interval': 1.0,
-        'grace_interval': 0.75
+        'grace_interval': 0.75,
+        'profit_target': 0.04
     },
     "SOL/USD": {
         'size': 0.04,
         'grid_interval': 1.0,
-        'grace_interval': 1.0
+        'grace_interval': 1.0,
+        'profit_target': 0.03
     },
     "ETH/USD": {
         'size': 0.003,
         'grid_interval': 1.5,
-        'grace_interval': 1.5
+        'grace_interval': 1.5,
+        'profit_target': 0.07
     },
 }
 SHORT_SLEEP_TIME = 0.1
@@ -1365,6 +1367,7 @@ class KrakenGridBot:
         """Calculate the optimal sell amount to ensure minimum profit after fees."""
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
         grace_interval = self.grid_settings[trading_pair]['grace_interval']
+        profit_target = TRADING_PAIRS[trading_pair]['profit_target']  # Get pair-specific profit target
         interval_amount = current_price * (grid_interval / 100)
         
         # Calculate prices
@@ -1376,9 +1379,9 @@ class KrakenGridBot:
         buy_fee = buy_cost * KRAKEN_FEE
         total_buy_cost = buy_cost + buy_fee
         
-        # Calculate how much asset we need to sell to cover costs and PROFIT_USD_TARGET
-        # Formula: (total_buy_cost + PROFIT_USD_TARGET) / (sell_price * (1 - KRAKEN_FEE))
-        required_sell_amount = (total_buy_cost + PROFIT_USD_TARGET) / (sell_price * (1 - KRAKEN_FEE))
+        # Calculate how much asset we need to sell to cover costs and profit target
+        # Formula: (total_buy_cost + profit_target) / (sell_price * (1 - KRAKEN_FEE))
+        required_sell_amount = (total_buy_cost + profit_target) / (sell_price * (1 - KRAKEN_FEE))
         
         # Round to appropriate decimal places
         decimals = 8 if trading_pair.startswith('BTC') else 5
@@ -1405,6 +1408,7 @@ class KrakenGridBot:
         print(f"Amount kept: {asset_kept}")
         print(f"Expected profit: ${actual_profit:.4f}")
         print(f"Total fees: ${(buy_fee + sell_fee):.4f}")
+        print(f"Target profit: ${profit_target:.4f}")
         
         return optimal_sell_amount
 
