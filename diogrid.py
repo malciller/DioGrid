@@ -13,19 +13,25 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-PROFIT_USD_TARGET = 0.02
+PROFIT_USD_TARGET = 0.05
 KRAKEN_FEE = 0.002
 STARTING_PORTFOLIO_INVESTMENT = 500.0
 PROFIT_INCREMENT = 5
-GRID_INTERVAL_GRACE = 0.05
 TRADING_PAIRS = {
     "BTC/USD": {
-        'size': 0.0001,
-        'grid_interval': 0.75
+        'size': 0.00011,
+        'grid_interval': 1.0,
+        'grace_interval': 0.75
     },
     "SOL/USD": {
         'size': 0.04,
-        'grid_interval': 2.0
+        'grid_interval': 1.0,
+        'grace_interval': 1.0
+    },
+    "ETH/USD": {
+        'size': 0.003,
+        'grid_interval': 1.5,
+        'grace_interval': 1.5
     },
 }
 SHORT_SLEEP_TIME = 0.1
@@ -970,7 +976,8 @@ class KrakenGridBot:
             pair: {
                 'buy_order_size': settings['size'],
                 'sell_order_size': settings['size'],
-                'grid_interval': settings['grid_interval'],  # Now using per-asset grid interval
+                'grid_interval': settings['grid_interval'],
+                'grace_interval': settings['grace_interval'],
                 'active_orders': set(),  # Track order IDs for this grid
                 'last_order_time': 0  # Add tracking for last order time
             }
@@ -1136,9 +1143,10 @@ class KrakenGridBot:
             print(f"Could not determine limit price for order {open_order['order_id']}")
             return False
 
-        # Calculate grid parameters using asset-specific interval
+        # Calculate grid parameters using asset-specific interval and grace
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
-        interval_amount = current_market_price * ((grid_interval + GRID_INTERVAL_GRACE) / 100)
+        grace_interval = self.grid_settings[trading_pair]['grace_interval']
+        interval_amount = current_market_price * ((grid_interval + grace_interval) / 100)
         
         # For buy orders, check if the order is too far from current market price
         if is_buy_order:
@@ -1356,10 +1364,11 @@ class KrakenGridBot:
     async def calculate_optimal_sell_amount(self, trading_pair: str, buy_amount: float, current_price: float) -> float:
         """Calculate the optimal sell amount to ensure minimum profit after fees."""
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
+        grace_interval = self.grid_settings[trading_pair]['grace_interval']
         interval_amount = current_price * (grid_interval / 100)
         
         # Calculate prices
-        buy_price = current_price - ((current_price * GRID_INTERVAL_GRACE)/100)
+        buy_price = current_price - ((current_price * grace_interval)/100)
         sell_price = current_price + interval_amount
         
         # Calculate total cost of buy (including fees)
