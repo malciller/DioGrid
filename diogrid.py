@@ -13,29 +13,35 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+
+# TRADING CONFIGURATION
 KRAKEN_FEE = 0.002
 STARTING_PORTFOLIO_INVESTMENT = 500.0
 PROFIT_INCREMENT = 5
 TRADING_PAIRS = {
     "BTC/USD": {
         'size': 0.00011,
-        'grid_interval': 1.0,
-        'grace_interval': 0.75,
-        'profit_target': 0.04
+        'grid_interval': 0.75,
+        'trail_interval': 0.5,
+        'usd_profit_target': 0.02
     },
     "SOL/USD": {
         'size': 0.04,
         'grid_interval': 1.0,
-        'grace_interval': 1.0,
-        'profit_target': 0.03
+        'trail_interval': 0.75,
+        'usd_profit_target': 0.04
     },
     "ETH/USD": {
-        'size': 0.003,
-        'grid_interval': 1.5,
-        'grace_interval': 1.5,
-        'profit_target': 0.07
+        'size': 0.0031,
+        'grid_interval': 1.25,
+        'trail_interval': 1.0,
+        'usd_profit_target': 0.06
     },
 }
+
+
+
+# SLEEP TIMES
 SHORT_SLEEP_TIME = 0.1
 LONG_SLEEP_TIME = 3
 GRID_DECAY_TIME = 5  # 5 second decay time
@@ -979,7 +985,7 @@ class KrakenGridBot:
                 'buy_order_size': settings['size'],
                 'sell_order_size': settings['size'],
                 'grid_interval': settings['grid_interval'],
-                'grace_interval': settings['grace_interval'],
+                'trail_interval': settings['trail_interval'],
                 'active_orders': set(),  # Track order IDs for this grid
                 'last_order_time': 0  # Add tracking for last order time
             }
@@ -1147,8 +1153,8 @@ class KrakenGridBot:
 
         # Calculate grid parameters using asset-specific interval and grace
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
-        grace_interval = self.grid_settings[trading_pair]['grace_interval']
-        interval_amount = current_market_price * ((grid_interval + grace_interval) / 100)
+        trail_interval = self.grid_settings[trading_pair]['trail_interval']
+        interval_amount = current_market_price * ((grid_interval + trail_interval) / 100)
         
         # For buy orders, check if the order is too far from current market price
         if is_buy_order:
@@ -1366,12 +1372,12 @@ class KrakenGridBot:
     async def calculate_optimal_sell_amount(self, trading_pair: str, buy_amount: float, current_price: float) -> float:
         """Calculate the optimal sell amount to ensure minimum profit after fees."""
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
-        grace_interval = self.grid_settings[trading_pair]['grace_interval']
-        profit_target = TRADING_PAIRS[trading_pair]['profit_target']  # Get pair-specific profit target
+        trail_interval = self.grid_settings[trading_pair]['trail_interval']
+        usd_profit_target = TRADING_PAIRS[trading_pair]['usd_profit_target']  # Get pair-specific profit target
         interval_amount = current_price * (grid_interval / 100)
         
         # Calculate prices
-        buy_price = current_price - ((current_price * grace_interval)/100)
+        buy_price = current_price - ((current_price * trail_interval)/100)
         sell_price = current_price + interval_amount
         
         # Calculate total cost of buy (including fees)
@@ -1380,8 +1386,8 @@ class KrakenGridBot:
         total_buy_cost = buy_cost + buy_fee
         
         # Calculate how much asset we need to sell to cover costs and profit target
-        # Formula: (total_buy_cost + profit_target) / (sell_price * (1 - KRAKEN_FEE))
-        required_sell_amount = (total_buy_cost + profit_target) / (sell_price * (1 - KRAKEN_FEE))
+        # Formula: (total_buy_cost + usd_profit_target) / (sell_price * (1 - KRAKEN_FEE))
+        required_sell_amount = (total_buy_cost + usd_profit_target) / (sell_price * (1 - KRAKEN_FEE))
         
         # Round to appropriate decimal places
         decimals = 8 if trading_pair.startswith('BTC') else 5
@@ -1408,7 +1414,7 @@ class KrakenGridBot:
         print(f"Amount kept: {asset_kept}")
         print(f"Expected profit: ${actual_profit:.4f}")
         print(f"Total fees: ${(buy_fee + sell_fee):.4f}")
-        print(f"Target profit: ${profit_target:.4f}")
+        print(f"Target profit: ${usd_profit_target:.4f}")
         
         return optimal_sell_amount
 
