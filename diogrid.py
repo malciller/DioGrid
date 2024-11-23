@@ -22,19 +22,19 @@ TRADING_PAIRS = {
     "BTC/USD": {
         'size': 0.00011,
         'grid_interval': 0.75,
-        'trail_interval': 0.5,
+        'trail_interval': 0.25,
         'usd_profit_target': 0.02
     },
     "SOL/USD": {
         'size': 0.04,
         'grid_interval': 1.0,
-        'trail_interval': 0.75,
+        'trail_interval': 0.5,
         'usd_profit_target': 0.04
     },
     "ETH/USD": {
         'size': 0.0031,
         'grid_interval': 1.25,
-        'trail_interval': 1.0,
+        'trail_interval': 0.75,
         'usd_profit_target': 0.06
     },
 }
