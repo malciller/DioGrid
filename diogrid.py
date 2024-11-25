@@ -15,9 +15,9 @@ from email.mime.multipart import MIMEMultipart
 
 
 # TRADING CONFIGURATION
-KRAKEN_FEE = 0.002
-STARTING_PORTFOLIO_INVESTMENT = 500.0
-PROFIT_INCREMENT = 5
+KRAKEN_FEE = 0.002 # current Kraken maker fee
+STARTING_PORTFOLIO_INVESTMENT = 500.0 # Starting USD portfolio balance
+PROFIT_INCREMENT = 5 # Dollar amount in realized portfolio value to take profit in USDC
 GRID_SPACING = 1.0  # Define spacing between grid and trail intervals
 
 TRADING_PAIRS = {
@@ -1268,7 +1268,7 @@ class KrakenGridBot:
         buy_amount = TRADING_PAIRS[trading_pair]['size']
         
         # Calculate optimal sell amount
-        sell_amount = buy_amount * 0.995
+        sell_amount = buy_amount * 0.999
         
         # Calculate grid prices
         interval_amount = current_price * (grid_interval / 100)
