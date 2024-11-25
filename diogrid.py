@@ -18,25 +18,20 @@ from email.mime.multipart import MIMEMultipart
 KRAKEN_FEE = 0.002
 STARTING_PORTFOLIO_INVESTMENT = 500.0
 PROFIT_INCREMENT = 5
+GRID_SPACING = 1.0  # Define spacing between grid and trail intervals
+
 TRADING_PAIRS = {
-    "BTC/USD": {
-        'size': 0.00011,
-        'grid_interval': 0.75,
-        'trail_interval': 0.25,
-        'usd_profit_target': 0.02
-    },
-    "SOL/USD": {
-        'size': 0.04,
-        'grid_interval': 1.0,
-        'trail_interval': 0.5,
-        'usd_profit_target': 0.04
-    },
-    "ETH/USD": {
-        'size': 0.0031,
-        'grid_interval': 1.25,
-        'trail_interval': 0.75,
-        'usd_profit_target': 0.06
-    },
+    pair: {
+        'size': size,
+        'grid_interval': grid,
+        'grid_spacing': spacing,
+        'trail_interval': grid + spacing
+    }
+    for pair, (size, grid, spacing) in {
+        "BTC/USD": (0.00011, 1.0, 1.0),  
+        "SOL/USD": (0.04, 1.5, 1.5),    
+        "ETH/USD": (0.0031, 2.0, 1.5),  
+    }.items()
 }
 
 
@@ -1154,21 +1149,24 @@ class KrakenGridBot:
         # Calculate grid parameters using asset-specific interval and grace
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
         trail_interval = self.grid_settings[trading_pair]['trail_interval']
-        interval_amount = current_market_price * ((grid_interval + trail_interval) / 100)
+        
+        # Calculate the maximum allowed distance (grid + trail)
+        max_interval = current_market_price * ((grid_interval + trail_interval) / 100)
         
         # For buy orders, check if the order is too far from current market price
         if is_buy_order:
             price_difference = current_market_price - order_price
             
-            # Order is too far below market price (> 1 grid interval away)
-            if price_difference > interval_amount:
-                print(f"ORDER: Market Price: ${current_market_price:.2f}, Grid Interval: ${interval_amount:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
-                target_price = current_market_price - interval_amount
+            # Order is too far below market price (exceeds grid + trail interval)
+            if price_difference > max_interval:
+                print(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
+                # Set new price at exactly grid + trail interval below current price
+                target_price = current_market_price - max_interval
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
-        
-        # Log order status
-        print(f"ORDER: Market Price: ${current_market_price:.2f}, Grid Interval: ${interval_amount:.2f}, Price Difference: ${price_difference:.2f}, Acceptable")
+            else:
+                # Log that order is within acceptable range
+                print(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Acceptable")
         
         return True
 
@@ -1270,15 +1268,7 @@ class KrakenGridBot:
         buy_amount = TRADING_PAIRS[trading_pair]['size']
         
         # Calculate optimal sell amount
-        sell_amount = await self.calculate_optimal_sell_amount(
-            trading_pair, 
-            buy_amount, 
-            current_price
-        )
-        
-        if sell_amount is None:
-            print(f"Skipping orders for {trading_pair} - cannot achieve minimum profit")
-            return
+        sell_amount = buy_amount * 0.995
         
         # Calculate grid prices
         interval_amount = current_price * (grid_interval / 100)
@@ -1370,10 +1360,9 @@ class KrakenGridBot:
         float: Optimal sell amount
     """
     async def calculate_optimal_sell_amount(self, trading_pair: str, buy_amount: float, current_price: float) -> float:
-        """Calculate the optimal sell amount to ensure minimum profit after fees."""
+        """Calculate sell amount - will sell 100% of bought amount."""
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
         trail_interval = self.grid_settings[trading_pair]['trail_interval']
-        usd_profit_target = TRADING_PAIRS[trading_pair]['usd_profit_target']  # Get pair-specific profit target
         interval_amount = current_price * (grid_interval / 100)
         
         # Calculate prices
@@ -1385,38 +1374,22 @@ class KrakenGridBot:
         buy_fee = buy_cost * KRAKEN_FEE
         total_buy_cost = buy_cost + buy_fee
         
-        # Calculate how much asset we need to sell to cover costs and profit target
-        # Formula: (total_buy_cost + usd_profit_target) / (sell_price * (1 - KRAKEN_FEE))
-        required_sell_amount = (total_buy_cost + usd_profit_target) / (sell_price * (1 - KRAKEN_FEE))
-        
-        # Round to appropriate decimal places
-        decimals = 8 if trading_pair.startswith('BTC') else 5
-        optimal_sell_amount = round(required_sell_amount, decimals)
-        
-        # If required sell amount exceeds buy amount, sell entire buy amount
-        if required_sell_amount > buy_amount:
-            print(f"Warning: Required sell amount ({required_sell_amount}) exceeds buy amount ({buy_amount})")
-            print("Will sell entire buy amount")
-            optimal_sell_amount = buy_amount
-        
-        # Calculate actual profit with final sell amount
-        sell_revenue = optimal_sell_amount * sell_price
+        # Calculate expected sell revenue and profit
+        sell_revenue = buy_amount * sell_price
         sell_fee = sell_revenue * KRAKEN_FEE
-        actual_profit = sell_revenue - sell_fee - total_buy_cost
-        asset_kept = buy_amount - optimal_sell_amount
+        expected_profit = sell_revenue - sell_fee - total_buy_cost
         
-        print(f"\nCalculated optimal sell amount for {trading_pair}:")
+        print(f"\nCalculated sell parameters for {trading_pair}:")
         print(f"Buy amount: {buy_amount}")
         print(f"Buy price: ${buy_price:.2f}")
         print(f"Sell price: ${sell_price:.2f}")
         print(f"Total buy cost (inc. fee): ${total_buy_cost:.4f}")
-        print(f"Amount needed to sell: {optimal_sell_amount}")
-        print(f"Amount kept: {asset_kept}")
-        print(f"Expected profit: ${actual_profit:.4f}")
+        print(f"Expected sell revenue: ${sell_revenue:.4f}")
         print(f"Total fees: ${(buy_fee + sell_fee):.4f}")
-        print(f"Target profit: ${usd_profit_target:.4f}")
+        print(f"Expected profit: ${expected_profit:.4f}")
         
-        return optimal_sell_amount
+        # Return the full buy amount as the sell amount
+        return buy_amount
 
 
 class EmailManager:
