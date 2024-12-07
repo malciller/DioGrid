@@ -19,3 +19,5 @@ logs/
 p_cancel.py
 cron.py
 calc.py
+
+rust/
