@@ -13,22 +13,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# Logging functions
-def log_error(msg: str):
-    """Log error messages with prominent formatting"""
-    print(f"\n[ERROR] {msg}")
-
-def log_warning(msg: str):
-    """Log warning messages"""
-    print(f"[WARNING] {msg}")
-
-def log_info(msg: str):
-    """Log important operational info"""
-    print(f"[INFO] {msg}")
-
-def log_success(msg: str):
-    """Log successful operations"""
-    print(f"[SUCCESS] {msg}")
 
 # TRADING CONFIGURATION
 KRAKEN_FEE = 0.002 # current Kraken maker fee
@@ -66,6 +50,35 @@ GRID_DECAY_TIME = 5  # 5 second decay time
 
 
 load_dotenv()
+
+
+
+
+class Logger:
+    ERROR = '\033[91m'    # Red
+    WARNING = '\033[93m'  # Yellow
+    INFO = '\033[94m'     # Blue
+    SUCCESS = '\033[92m'  # Green
+    RESET = '\033[0m'     # Reset color
+
+    @staticmethod
+    def error(msg: str, exc_info: Exception = None):
+        error_msg = f"{Logger.ERROR}[ERROR] {msg}{Logger.RESET}"
+        if exc_info:
+            error_msg += f"\n{Logger.ERROR}Exception: {str(exc_info)}{Logger.RESET}"
+        print(error_msg)
+
+    @staticmethod
+    def warning(msg: str):
+        print(f"{Logger.WARNING}[WARNING] {msg}{Logger.RESET}")
+
+    @staticmethod
+    def info(msg: str):
+        print(f"{Logger.INFO}[INFO] {msg}{Logger.RESET}")
+
+    @staticmethod
+    def success(msg: str):
+        print(f"{Logger.SUCCESS}[SUCCESS] {msg}{Logger.RESET}")
 
 class KrakenAPIError(Exception):
     """Custom exception class for Kraken API errors"""
@@ -266,7 +279,7 @@ class KrakenWebSocketClient:
             
             return token
         except Exception as e:
-            print(f"Error during connection: {str(e)}")
+            Logger.error(f"Error during connection: {str(e)}")
             # Clean up any partially created tasks/connections
             await self.disconnect()
             raise
@@ -303,7 +316,7 @@ class KrakenWebSocketClient:
             if self.public_websocket:
                 await self.public_websocket.close()
         except Exception as e:
-            print(f"Error during disconnect: {str(e)}")
+            Logger.error(f"Error during disconnect: {str(e)}")
 
     """
     Monitors WebSocket connection health and handles reconnection attempts.
@@ -330,22 +343,22 @@ class KrakenWebSocketClient:
                     status['last_ping'] = current_time
                 
                 if time_since_pong > self.ping_interval + self.pong_timeout:
-                    log_warning(f"Missing pong response for private connection (last pong was {time_since_pong:.1f}s ago)")
+                    Logger.warning(f"Missing pong response for private connection (last pong was {time_since_pong:.1f}s ago)")
                     needs_reconnect = True
 
                 time_since_ticker = current_time - self.last_ticker_time
                 if time_since_ticker > self.ping_interval + self.pong_timeout:
-                    log_warning(f"No ticker data received for {time_since_ticker:.1f}s")
+                    Logger.warning(f"No ticker data received for {time_since_ticker:.1f}s")
                     needs_reconnect = True
 
                 if needs_reconnect:
                     if reconnect_attempts < self.max_reconnect_attempts:
                         reconnect_attempts += 1
-                        log_warning(f"Connection lost. Attempting reconnection (attempt {reconnect_attempts}/{self.max_reconnect_attempts})")
+                        Logger.warning(f"Connection lost. Attempting reconnection (attempt {reconnect_attempts}/{self.max_reconnect_attempts})")
                         await self.reconnect()
                         continue
                     else:
-                        log_error("Max reconnection attempts reached")
+                        Logger.error("Max reconnection attempts reached")
                         self.running = False
                         break
 
@@ -353,7 +366,7 @@ class KrakenWebSocketClient:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            log_error(f"Connection maintenance error: {str(e)}")
+            Logger.error(f"Connection maintenance error: {str(e)}")
             self.running = False
 
     """
@@ -373,7 +386,7 @@ class KrakenWebSocketClient:
         try:
             await self.websocket.send(json.dumps(ping_message))
         except Exception as e:
-            print(f"Error sending ping: {str(e)}")
+            Logger.error("Error sending ping", e)
 
     """
     Attempts to reestablish lost WebSocket connections.
@@ -384,7 +397,7 @@ class KrakenWebSocketClient:
     """
     async def reconnect(self):
         """Reconnect to WebSocket endpoints."""
-        print("Reconnecting to WebSocket...")
+        Logger.info("Reconnecting to WebSocket...")
         
         # Close existing connections
         if self.websocket:
@@ -404,10 +417,10 @@ class KrakenWebSocketClient:
             if self.active_trading_pairs:
                 await self.subscribe_ticker(list(self.active_trading_pairs))
             
-            print("Successfully reconnected to WebSocket")
+            Logger.success("Successfully reconnected to WebSocket")
             
         except Exception as e:
-            print(f"Error during reconnection: {str(e)}")
+            Logger.error("Error during reconnection", e)
             raise
 
     """
@@ -427,10 +440,10 @@ class KrakenWebSocketClient:
         except asyncio.CancelledError:
             pass
         except websockets.exceptions.ConnectionClosed:
-            print("WebSocket connection closed.")
+            Logger.warning("WebSocket connection closed")
             self.running = False
         except Exception as e:
-            print(f"Error in message handling: {e}")
+            Logger.error("Error in message handling", e)
             self.running = False
 
     """
@@ -448,10 +461,9 @@ class KrakenWebSocketClient:
                 message = await self.public_websocket.recv()
                 data = json.loads(message)
                 
-                # Handle pong responses
-                if isinstance(data, dict) and (data.get('event') == 'pong' or data.get('method') == 'pong'):
-                    self.connection_status['public']['last_pong'] = time.time()
-                    return
+                if isinstance(data, dict) and data.get('event') == 'error':
+                    Logger.error(f"WebSocket error: {data.get('error')}")
+                    continue
                 
                 # Handle other message types
                 if data.get('channel') == 'heartbeat':
@@ -460,7 +472,7 @@ class KrakenWebSocketClient:
                     continue
                 if isinstance(data, dict) and data.get('method') in ['subscribe', 'unsubscribe']:
                     if not data.get('success') and data.get('error'):
-                        print(f"WebSocket error: {data.get('error')}")
+                        Logger.error(f"WebSocket subscription error: {data.get('error')}")
                     continue
                 
                 if data.get('channel') == 'ticker':
@@ -468,9 +480,9 @@ class KrakenWebSocketClient:
         except asyncio.CancelledError:
             pass
         except websockets.exceptions.ConnectionClosed:
-            print("Public WebSocket connection closed.")
+            Logger.warning("Public WebSocket connection closed")
         except Exception as e:
-            print(f"Error in public message handling: {e}")
+            Logger.error("Error in public message handling", e)
 
     """
     Processes a single WebSocket message.
@@ -488,7 +500,6 @@ class KrakenWebSocketClient:
         try:
             data = json.loads(message)
             
-            # Check if this is a response to a pending request
             if isinstance(data, dict) and 'req_id' in data:
                 req_id = data['req_id']
                 if hasattr(self, '_response_futures') and req_id in self._response_futures:
@@ -496,14 +507,12 @@ class KrakenWebSocketClient:
                         self._response_futures[req_id].set_result(data)
                     return
             
-            # Handle other message types as before
             if isinstance(data, dict) and (data.get('event') == 'pong' or data.get('method') == 'pong'):
                 self.connection_status['private']['last_pong'] = time.time()
                 return
             
-            # Handle edit_order responses
             if isinstance(data, dict) and data.get('method') == 'edit_order':
-                print(f"Received edit_order response: {data}")
+                Logger.info(f"Order edit response: {data}")
                 return
             
             if 'channel' in data:
@@ -511,13 +520,12 @@ class KrakenWebSocketClient:
                 if channel in self.handlers:
                     await self.handlers[channel](data)
             elif 'event' in data:
-                # Only print important system status events
                 if data.get('event') == 'systemStatus' and data.get('status') != 'online':
-                    print(f"System status: {data}")
+                    Logger.warning(f"System status: {data}")
         except json.JSONDecodeError as e:
-            print(f"Invalid JSON message: {str(e)}")
+            Logger.error("Invalid JSON message", e)
         except Exception as e:
-            print(f"Error handling message: {str(e)}")
+            Logger.error("Error handling message", e)
 
     """
     Subscribes to specified WebSocket channels.
@@ -540,7 +548,6 @@ class KrakenWebSocketClient:
                 }
             }
             
-            # Add specific parameters for executions channel
             if channel == 'executions':
                 subscribe_message["params"].update({
                     "snap_orders": True,
@@ -550,7 +557,7 @@ class KrakenWebSocketClient:
                 subscribe_message["params"]["snapshot"] = True
 
             await self.websocket.send(json.dumps(subscribe_message))
-            print(f"Subscribed to {channel} channel.")
+            Logger.info(f"Subscribed to {channel} channel")
 
     """
     Unsubscribes from specified WebSocket channels.
@@ -577,14 +584,13 @@ class KrakenWebSocketClient:
                     }
                 }
                 await self.websocket.send(json.dumps(unsubscribe_message))
-                print(f"Unsubscribed from {channel} channel.")
-                # Wait briefly for unsubscribe confirmation
+                Logger.info(f"Unsubscribed from {channel} channel")
                 await asyncio.sleep(SHORT_SLEEP_TIME)
             except websockets.exceptions.ConnectionClosed:
-                print(f"Connection closed while unsubscribing from {channel}")
+                Logger.warning(f"Connection closed while unsubscribing from {channel}")
                 break
             except Exception as e:
-                print(f"Error unsubscribing from {channel}: {str(e)}")
+                Logger.error(f"Error unsubscribing from {channel}", e)
 
     """
     Registers a handler function for a specific channel.
@@ -629,7 +635,7 @@ class KrakenWebSocketClient:
         
         self.portfolio_value = total_value
         current_time = time.strftime('%H:%M:%S')
-        log_info(f"Portfolio Value: ${total_value:,.2f} ({current_time})")
+        Logger.info(f"Portfolio Value: ${total_value:,.2f} ({current_time})")
         
         # Check if we should take profit
         # IMPORTANT DO NOT DELETE THIS, commented out for compounding returns, will be used in future
@@ -685,10 +691,10 @@ class KrakenWebSocketClient:
 
             try:
                 await self.websocket.send(json.dumps(order_message))
-                print(f"PROFIT: Taking profit of ${PROFIT_INCREMENT:.2f} USDC at portfolio value ${self.portfolio_value:.2f}")
+                Logger.success(f"PROFIT: Taking profit of ${PROFIT_INCREMENT:.2f} USDC at portfolio value ${self.portfolio_value:.2f}")
                 self.last_profit_take_time = current_time
             except Exception as e:
-                print(f"Error taking profit: {str(e)}")
+                Logger.error(f"Error taking profit: {str(e)}")
 
     """
     Processes balance updates and manages ticker subscriptions.
@@ -763,13 +769,13 @@ class KrakenWebSocketClient:
                 }
             }
             try:
-                print(f"DEBUG: Attempting to subscribe to ticker for {symbol}")
+                Logger.info(f"DEBUG: Attempting to subscribe to ticker for {symbol}")
                 await self.public_websocket.send(json.dumps(subscribe_message))
                 self.ticker_subscriptions[symbol] = True
-                print(f"Subscribed to ticker for: {symbol}")
+                Logger.info(f"Subscribed to ticker for: {symbol}")
                 await asyncio.sleep(SHORT_SLEEP_TIME)
             except Exception as e:
-                print(f"Error subscribing to ticker for {symbol}: {str(e)}")
+                Logger.error(f"Error subscribing to ticker for {symbol}", e)
 
     """
     Unsubscribes from ticker data for specified trading pairs.
@@ -797,12 +803,12 @@ class KrakenWebSocketClient:
             await self.public_websocket.send(json.dumps(unsubscribe_message))
             for symbol in symbols:
                 self.ticker_subscriptions.pop(symbol, None)
-                print(f"Unsubscribed from ticker for: {symbol}")
+                Logger.info(f"Unsubscribed from ticker for: {symbol}")
             await asyncio.sleep(SHORT_SLEEP_TIME)
         except websockets.exceptions.ConnectionClosed:
-            print("Public connection closed while unsubscribing from tickers")
+            Logger.warning("Public connection closed while unsubscribing from tickers")
         except Exception as e:
-            print(f"Error unsubscribing from tickers: {str(e)}")
+            Logger.error(f"Error unsubscribing from tickers", e)
 
     """
     Processes incoming ticker updates and updates portfolio values.
@@ -870,13 +876,13 @@ class KrakenWebSocketClient:
                 if exec_type in ['filled', 'canceled', 'expired']:
                     if order_id in self.orders:
                         removed_order = self.orders.pop(order_id)
-                        log_info(f"Order {order_id} for {removed_order.get('symbol')} {exec_type}")
+                        Logger.info(f"Order {order_id} for {removed_order.get('symbol')} {exec_type}")
                 elif exec_type in ['new', 'pending_new']:
                     if order_id in self.orders:
                         self.orders[order_id].update(execution)
                     else:
                         self.orders[order_id] = execution
-                        log_info(f"New order {order_id} for {symbol}")
+                        Logger.info(f"New order {order_id} for {symbol}")
                 elif order_id in self.orders:
                     self.orders[order_id].update(execution)
 
@@ -963,7 +969,7 @@ class KrakenWebSocketClient:
             # Wait for response with timeout
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError:
-            print(f"Timeout waiting for response to request {req_id}")
+            Logger.warning(f"Timeout waiting for response to request {req_id}")
             return None
         finally:
             # Clean up future
@@ -999,7 +1005,7 @@ class KrakenGridBot:
         # Format the price with the specified precision
         formatted_price = float(f"{price:.{precision}f}")
         
-        print(f"Formatted {trading_pair} price from {price} to {formatted_price} with {precision} decimals")
+        Logger.info(f"Formatted {trading_pair} price from {price} to {formatted_price} with {precision} decimals")
         return formatted_price
 
     """
@@ -1015,10 +1021,10 @@ class KrakenGridBot:
         """Initialize and start the grid trading strategy."""
         # Subscribe to all trading pairs defined in configuration
         trading_pairs = list(TRADING_PAIRS.keys())
-        print(f"DEBUG: Subscribing to trading pairs: {trading_pairs}")
+        Logger.info(f"DEBUG: Subscribing to trading pairs: {trading_pairs}")
         await self.client.subscribe_ticker(trading_pairs)
         
-        print("Starting grid bot monitoring...")
+        Logger.info("Starting grid bot monitoring...")
     
     """
     Calculates buy price for a trading pair based on grid settings.
@@ -1034,7 +1040,7 @@ class KrakenGridBot:
         # Get current ticker data for the trading pair
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
-            print(f"No ticker data available for {trading_pair}")
+            Logger.warning(f"No ticker data available for {trading_pair}")
             return None
             
         # Get current price from last trade
@@ -1046,7 +1052,7 @@ class KrakenGridBot:
         # Calculate buy price (current price minus interval)
         buy_price = current_price - interval_amount
         
-        print(f"Grid price for {trading_pair}: Current=${current_price:.2f}, Buy=${buy_price:.2f}, Interval=${interval_amount:.2f}")
+        Logger.info(f"Grid price for {trading_pair}: Current=${current_price:.2f}, Buy=${buy_price:.2f}, Interval=${interval_amount:.2f}")
         return buy_price
 
     """
@@ -1071,19 +1077,19 @@ class KrakenGridBot:
         
         try:
             await self.client.websocket.send(json.dumps(cancel_message))
-            print(f"Sent cancel request for order {order_id}")
+            Logger.info(f"Sent cancel request for order {order_id}")
             
             # Wait briefly for the cancel to process
             await asyncio.sleep(LONG_SLEEP_TIME)
             
             # Verify the order was removed from client.orders
             if order_id not in self.client.orders:
-                print(f"Successfully canceled order {order_id}")
+                Logger.success(f"Successfully canceled order {order_id}")
             else:
-                print(f"Warning: Order {order_id} may not have been canceled")
+                Logger.warning(f"Warning: Order {order_id} may not have been canceled")
                 
         except Exception as e:
-            print(f"Error sending cancel request: {str(e)}")
+            Logger.error(f"Error sending cancel request: {str(e)}")
             raise
 
     """
@@ -1098,8 +1104,8 @@ class KrakenGridBot:
     """
     async def check_open_orders(self, trading_pair: str):
         """Check if there are any open orders for a trading pair."""
-        print(f"\nDEBUG: Checking open orders for {trading_pair}")
-        print(f"DEBUG: Current orders in memory: {len(self.client.orders)}")
+        Logger.info(f"\nDEBUG: Checking open orders for {trading_pair}")
+        Logger.info(f"DEBUG: Current orders in memory: {len(self.client.orders)}")
         
         # Filter orders for the specified trading pair that are open
         open_orders = [
@@ -1112,24 +1118,24 @@ class KrakenGridBot:
         
         # Debug logging for found orders
         if open_orders:
-            print(f"DEBUG: Found {len(open_orders)} open orders for {trading_pair}:")
+            Logger.info(f"DEBUG: Found {len(open_orders)} open orders for {trading_pair}:")
             for order in open_orders:
-                print(f"DEBUG: Order ID: {order.get('order_id')}")
-                print(f"DEBUG: Status: {order.get('order_status')}")
-                print(f"DEBUG: Side: {order.get('side')}")
-                print(f"DEBUG: Price: {order.get('limit_price')}")
+                Logger.info(f"DEBUG: Order ID: {order.get('order_id')}")
+                Logger.info(f"DEBUG: Status: {order.get('order_status')}")
+                Logger.info(f"DEBUG: Side: {order.get('side')}")
+                Logger.info(f"DEBUG: Price: {order.get('limit_price')}")
         else:
-            print(f"DEBUG: No open orders found for {trading_pair}")
+            Logger.info(f"DEBUG: No open orders found for {trading_pair}")
 
         # If no open buy orders exist, place new order
         if not open_orders:
-            print(f"No buy orders found for {trading_pair}")
+            Logger.info(f"No buy orders found for {trading_pair}")
             await self.place_orders(trading_pair)
             return None
 
         # If multiple buy orders exist (shouldn't happen), keep most recent
         if len(open_orders) > 1:
-            print(f"Warning: Found {len(open_orders)} buy orders for {trading_pair}")
+            Logger.warning(f"Warning: Found {len(open_orders)} buy orders for {trading_pair}")
             # Keep most recent buy order
             kept_order = sorted(open_orders, key=lambda x: x.get('time', 0), reverse=True)[0]
             # Cancel others
@@ -1154,13 +1160,13 @@ class KrakenGridBot:
     async def check_open_orders_open_order_interval(self, trading_pair: str, open_order: dict):
         """Check if an open order is still within the grid interval."""
         if not open_order:
-            print(f"No open order provided for {trading_pair}")
+            Logger.warning(f"No open order provided for {trading_pair}")
             return False
             
         # Get current market data
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
-            print(f"No ticker data available for {trading_pair}")
+            Logger.warning(f"No ticker data available for {trading_pair}")
             return False
 
         # Get current market price and order details
@@ -1169,7 +1175,7 @@ class KrakenGridBot:
         is_buy_order = open_order.get('side') == 'buy'
         
         if not order_price:
-            print(f"Could not determine limit price for order {open_order['order_id']}")
+            Logger.warning(f"Could not determine limit price for order {open_order['order_id']}")
             return False
 
         # Calculate grid parameters using asset-specific interval and grace
@@ -1185,14 +1191,14 @@ class KrakenGridBot:
             
             # Order is too far below market price (exceeds grid + trail interval)
             if price_difference > max_interval:
-                print(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
+                Logger.warning(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
                 # Set new price at exactly grid + trail interval below current price
                 target_price = current_market_price - max_interval  # This is correct - using full interval for updates
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
             else:
                 # Log that order is within acceptable range
-                print(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Acceptable")
+                Logger.info(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Acceptable")
         
         return True
 
@@ -1212,7 +1218,7 @@ class KrakenGridBot:
     """
     async def update_order_price(self, trading_pair: str, order: dict, new_price: float):
         if not order or not order.get('order_id'):
-            print("No valid order provided to update")
+            Logger.warning("No valid order provided to update")
             return None
         
         try:
@@ -1243,22 +1249,22 @@ class KrakenGridBot:
             
             # Send amend order and wait for response
             await self.client.websocket.send(json.dumps(amend_message))
-            print(f"ORDER: Sent amend request for order {order['order_id']} to price ${formatted_price}")
+            Logger.info(f"ORDER: Sent amend request for order {order['order_id']} to price ${formatted_price}")
             
             # Wait for response
             response = await self.client.wait_for_response(req_id)
             if response and response.get('success') is True:
-                print(f"ORDER: Successfully updated order price to ${formatted_price}")
+                Logger.success(f"ORDER: Successfully updated order price to ${formatted_price}")
                 return True
             else:
-                print(f"Failed to update order price: {response}")
+                Logger.warning(f"Failed to update order price: {response}")
                 # If amend fails, cancel the order and place a new one
                 await self.cancel_order(order['order_id'])
                 await self.place_orders(trading_pair)
                 return False
             
         except Exception as e:
-            print(f"Error updating order price: {str(e)}")
+            Logger.error(f"Error updating order price: {str(e)}")
             return False
         
         
@@ -1279,13 +1285,13 @@ class KrakenGridBot:
         
         if current_time - last_order_time < GRID_DECAY_TIME:
             time_left = GRID_DECAY_TIME - (current_time - last_order_time)
-            log_info(f"Decay timer active for {trading_pair}. {time_left:.1f}s remaining")
+            Logger.info(f"Decay timer active for {trading_pair}. {time_left:.1f}s remaining")
             return
             
-        log_info(f"Executing trade strategy for {trading_pair}")
+        Logger.info(f"Executing trade strategy for {trading_pair}")
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
-            log_error(f"No ticker data available for {trading_pair}")
+            Logger.error(f"No ticker data available for {trading_pair}")
             return
         
         # Update last order time before placing orders
@@ -1327,29 +1333,29 @@ class KrakenGridBot:
                 "req_id": buy_req_id
             }
             
-            log_info(f"Placing buy order for {trading_pair} - Price: ${buy_price:.2f}, Quantity: {buy_amount}")
+            Logger.info(f"Placing buy order for {trading_pair} - Price: ${buy_price:.2f}, Quantity: {buy_amount}")
             
             try:
                 await self.client.websocket.send(json.dumps(buy_order_msg))
                 buy_response = await self.client.wait_for_response(buy_req_id)
                 
                 if not buy_response:
-                    log_error(f"No response received for buy order on {trading_pair}")
+                    Logger.error(f"No response received for buy order on {trading_pair}")
                     return
                     
                 if not buy_response.get('success'):
                     error_msg = buy_response.get('error', 'Unknown error')
-                    log_error(f"Buy order failed for {trading_pair}: {error_msg}")
+                    Logger.error(f"Buy order failed for {trading_pair}: {error_msg}")
                     return
                     
                 order_id = buy_response.get('result', {}).get('order_id')
                 if not order_id:
-                    log_error(f"No order ID received for {trading_pair}")
+                    Logger.error(f"No order ID received for {trading_pair}")
                     return
                     
                 self.grid_settings[trading_pair]['active_orders'].add(order_id)
                 self.grid_orders[trading_pair]['buy'] = order_id
-                log_success(f"Grid buy order placed for {trading_pair} with ID: {order_id}")
+                Logger.success(f"Grid buy order placed for {trading_pair} with ID: {order_id}")
                 
                 # Try to place corresponding sell order
                 try:
@@ -1367,7 +1373,7 @@ class KrakenGridBot:
                         "req_id": sell_req_id
                     }
                     
-                    log_info(f"Placing sell order for {trading_pair} - Price: ${sell_price:.2f}, Quantity: {sell_amount}")
+                    Logger.info(f"Placing sell order for {trading_pair} - Price: ${sell_price:.2f}, Quantity: {sell_amount}")
                     
                     await self.client.websocket.send(json.dumps(sell_order_msg))
                     sell_response = await self.client.wait_for_response(sell_req_id)
@@ -1376,20 +1382,20 @@ class KrakenGridBot:
                         sell_order_id = sell_response.get('result', {}).get('order_id')
                         if sell_order_id:
                             self.grid_orders[trading_pair]['sell'] = sell_order_id
-                            log_success(f"Grid sell order placed for {trading_pair} with ID: {sell_order_id}")
+                            Logger.success(f"Grid sell order placed for {trading_pair} with ID: {sell_order_id}")
                         else:
-                            log_warning(f"Sell order placed but no ID received for {trading_pair}")
+                            Logger.warning(f"Sell order placed but no ID received for {trading_pair}")
                     else:
-                        log_info(f"Could not place sell order for {trading_pair} (likely insufficient funds)")
+                        Logger.info(f"Could not place sell order for {trading_pair} (likely insufficient funds)")
                         
                 except Exception as sell_error:
-                    log_error(f"Error placing sell order for {trading_pair}: {str(sell_error)}")
+                    Logger.error(f"Error placing sell order for {trading_pair}: {str(sell_error)}")
                     
             except Exception as send_error:
-                log_error(f"Error sending buy order for {trading_pair}: {str(send_error)}")
+                Logger.error(f"Error sending buy order for {trading_pair}: {str(send_error)}")
                 
         except Exception as e:
-            log_error(f"Critical error placing orders for {trading_pair}: {str(e)}")
+            Logger.error(f"Critical error placing orders for {trading_pair}: {str(e)}")
             # Reset the decay timer on error
             self.grid_settings[trading_pair]['last_order_time'] = 0
 
@@ -1424,14 +1430,14 @@ class KrakenGridBot:
         sell_fee = sell_revenue * KRAKEN_FEE
         expected_profit = sell_revenue - sell_fee - total_buy_cost
         
-        print(f"\nCalculated sell parameters for {trading_pair}:")
-        print(f"Buy amount: {buy_amount}")
-        print(f"Buy price: ${buy_price:.2f}")
-        print(f"Sell price: ${sell_price:.2f}")
-        print(f"Total buy cost (inc. fee): ${total_buy_cost:.4f}")
-        print(f"Expected sell revenue: ${sell_revenue:.4f}")
-        print(f"Total fees: ${(buy_fee + sell_fee):.4f}")
-        print(f"Expected profit: ${expected_profit:.4f}")
+        Logger.info(f"\nCalculated sell parameters for {trading_pair}:")
+        Logger.info(f"Buy amount: {buy_amount}")
+        Logger.info(f"Buy price: ${buy_price:.2f}")
+        Logger.info(f"Sell price: ${sell_price:.2f}")
+        Logger.info(f"Total buy cost (inc. fee): ${total_buy_cost:.4f}")
+        Logger.info(f"Expected sell revenue: ${sell_revenue:.4f}")
+        Logger.info(f"Total fees: ${(buy_fee + sell_fee):.4f}")
+        Logger.info(f"Expected profit: ${expected_profit:.4f}")
         
         # Return the full buy amount as the sell amount
         return buy_amount
@@ -1469,7 +1475,7 @@ class EmailManager:
                 
                 # If within cooldown period, skip sending
                 if current_time - last_time < (cooldown_minutes * 60):
-                    print(f"Skipping {notification_type} notification - within cooldown period")
+                    Logger.info(f"Skipping {notification_type} notification - within cooldown period")
                     return
                 
                 # Update last notification time
@@ -1490,10 +1496,10 @@ class EmailManager:
                 server.login(self.sender_email, self.app_password)
                 server.send_message(message)
             
-            print(f"Email notification sent: {subject}")
+            Logger.info(f"Email notification sent: {subject}")
             
         except Exception as e:
-            print(f"Failed to send email notification: {str(e)}")
+            Logger.error(f"Failed to send email notification: {str(e)}")
 
 
 """
@@ -1527,19 +1533,19 @@ async def main():
                     if current_order:
                         # If we have an order, check if it's still valid
                         is_valid = await grid_bot.check_open_orders_open_order_interval(pair, current_order)
-                        print(f"ORDER: validity for {pair}: {is_valid}")
+                        Logger.info(f"ORDER: validity for {pair}: {is_valid}")
                     else:
-                        print(f"ORDER: No current orders for {pair}")
+                        Logger.info(f"ORDER: No current orders for {pair}")
                     
                 await asyncio.sleep(LONG_SLEEP_TIME)
             except asyncio.CancelledError:
                 break
     except KrakenAPIError as e:
-        print(f"Kraken API error: {e.error_code} - {e.message}")
+        Logger.error(f"Kraken API error: {e.error_code} - {e.message}")
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        Logger.error(f"Unexpected error: {str(e)}")
     finally:
-        print("\nGracefully shutting down...")
+        Logger.info("\nGracefully shutting down...")
         try:
             # First unsubscribe from all channels if connection is still open
             if client.websocket:
@@ -1550,16 +1556,16 @@ async def main():
                 await asyncio.sleep(LONG_SLEEP_TIME)
             # Then disconnect
             await client.disconnect()
-            print("Successfully disconnected from all Kraken WebSocket streams.")
+            Logger.success("Successfully disconnected from all Kraken WebSocket streams.")
         except Exception as e:
-            print(f"Error during shutdown: {str(e)}")
+            Logger.error(f"Error during shutdown: {str(e)}")
             # Optionally, add more detailed error information for debugging
             import traceback
-            print(f"Shutdown error details:\n{traceback.format_exc()}")
+            Logger.error(f"Shutdown error details:\n{traceback.format_exc()}")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nKeyboardInterrupt received. Exiting...")
+        Logger.info("\nKeyboardInterrupt received. Exiting...")
