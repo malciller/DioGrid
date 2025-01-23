@@ -13,24 +13,46 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+# Logging functions
+def log_error(msg: str):
+    """Log error messages with prominent formatting"""
+    print(f"\n[ERROR] {msg}")
+
+def log_warning(msg: str):
+    """Log warning messages"""
+    print(f"[WARNING] {msg}")
+
+def log_info(msg: str):
+    """Log important operational info"""
+    print(f"[INFO] {msg}")
+
+def log_success(msg: str):
+    """Log successful operations"""
+    print(f"[SUCCESS] {msg}")
 
 # TRADING CONFIGURATION
 KRAKEN_FEE = 0.002 # current Kraken maker fee
-STARTING_PORTFOLIO_INVESTMENT = 500.0 # Starting USD portfolio balance
-PROFIT_INCREMENT = 5 # Dollar amount in realized portfolio value to take profit in USDC
-GRID_SPACING = 1.0  # Define spacing between grid and trail intervals
-
+STARTING_PORTFOLIO_INVESTMENT = 2500.0 # Starting USD portfolio balance
+PROFIT_INCREMENT = 10 # Dollar amount in realized portfolio value to take profit in USDC
 TRADING_PAIRS = {
     pair: {
         'size': size,
         'grid_interval': grid,
         'grid_spacing': spacing,
-        'trail_interval': grid + spacing
+        'trail_interval': spacing,
+        'precision': precision
     }
-    for pair, (size, grid, spacing) in {
-        "BTC/USD": (0.00011, 1.0, 1.0),  
-        "SOL/USD": (0.04, 1.5, 1.5),    
-        "ETH/USD": (0.0031, 2.0, 1.5),  
+    for pair, (size, grid, spacing, precision) in {
+        "BTC/USD": (0.00072, 0.75, 0.75, 1),    # $70.00 @ 2.8x
+        "ETH/USD": (0.0035, 2.5, 2.5, 2),       
+        "SOL/USD": (0.06, 2.5, 1.5, 2),        
+        "XRP/USD": (5.0, 2.5, 1.5, 5),          
+        "ADA/USD": (12.0, 2.5, 2.5, 6),          
+        "TRX/USD": (50.0, 2.5, 2.5, 6),         
+        "AVAX/USD": (0.35, 2.5, 2.5, 2),  
+        "LINK/USD": (0.5, 2.5, 2.5, 5),      
+        #"XLM/USD": (27.0, 2.5, 2.5, 6),          
+        #"SUI/USD": (2.5, 2.5, 2.5, 4),  
     }.items()
 }
 
@@ -300,35 +322,30 @@ class KrakenWebSocketClient:
                 current_time = time.time()
                 needs_reconnect = False
 
-                # Check private connection health
                 status = self.connection_status['private']
                 time_since_pong = current_time - status['last_pong']
                 
                 if current_time - status['last_ping'] >= self.ping_interval:
-                    #print(f"Sending ping for private connection")
                     await self.ping()
                     status['last_ping'] = current_time
                 
                 if time_since_pong > self.ping_interval + self.pong_timeout:
-                    print(f"Warning: Missing pong response for private connection "
-                          f"(last pong was {time_since_pong:.1f}s ago)")
+                    log_warning(f"Missing pong response for private connection (last pong was {time_since_pong:.1f}s ago)")
                     needs_reconnect = True
 
-                # Check public connection health via ticker data
                 time_since_ticker = current_time - self.last_ticker_time
                 if time_since_ticker > self.ping_interval + self.pong_timeout:
-                    print(f"Warning: No ticker data received for {time_since_ticker:.1f}s")
+                    log_warning(f"No ticker data received for {time_since_ticker:.1f}s")
                     needs_reconnect = True
 
                 if needs_reconnect:
                     if reconnect_attempts < self.max_reconnect_attempts:
                         reconnect_attempts += 1
-                        print(f"Connection lost. Attempting reconnection "
-                              f"(attempt {reconnect_attempts}/{self.max_reconnect_attempts})")
+                        log_warning(f"Connection lost. Attempting reconnection (attempt {reconnect_attempts}/{self.max_reconnect_attempts})")
                         await self.reconnect()
                         continue
                     else:
-                        print("Error: Max reconnection attempts reached")
+                        log_error("Max reconnection attempts reached")
                         self.running = False
                         break
 
@@ -336,7 +353,7 @@ class KrakenWebSocketClient:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"Error in connection maintenance: {str(e)}")
+            log_error(f"Connection maintenance error: {str(e)}")
             self.running = False
 
     """
@@ -612,10 +629,11 @@ class KrakenWebSocketClient:
         
         self.portfolio_value = total_value
         current_time = time.strftime('%H:%M:%S')
-        print(f"PORTFOLIO: ${total_value:,.2f} ({current_time})")
+        log_info(f"Portfolio Value: ${total_value:,.2f} ({current_time})")
         
         # Check if we should take profit
-        await self.check_and_take_profit()
+        # IMPORTANT DO NOT DELETE THIS, commented out for compounding returns, will be used in future
+        #await self.check_and_take_profit()
 
     """
     Monitors portfolio value and executes profit-taking orders when targets are met.
@@ -645,6 +663,7 @@ class KrakenWebSocketClient:
                 f"Portfolio Value: ${self.portfolio_value:.2f}\n"
                 f"Previous High: ${self.highest_portfolio_value:.2f}"
             )
+            #TODO: Fix email sending, not currently working from docker environment
             await self.email_manager.send_email(
                 subject=f"Diophant Grid Bot - Profit Take Attempt {current_time}",
                 body=email_body,
@@ -740,14 +759,14 @@ class KrakenWebSocketClient:
                 "method": "subscribe",
                 "params": {
                     "channel": "ticker",
-                    "symbol": [symbol]  # Subscribe to one symbol at a time
+                    "symbol": [symbol]
                 }
             }
             try:
+                print(f"DEBUG: Attempting to subscribe to ticker for {symbol}")
                 await self.public_websocket.send(json.dumps(subscribe_message))
                 self.ticker_subscriptions[symbol] = True
                 print(f"Subscribed to ticker for: {symbol}")
-                # Small delay between subscriptions to avoid overwhelming the connection
                 await asyncio.sleep(SHORT_SLEEP_TIME)
             except Exception as e:
                 print(f"Error subscribing to ticker for {symbol}: {str(e)}")
@@ -772,7 +791,7 @@ class KrakenWebSocketClient:
                 "method": "unsubscribe",
                 "params": {
                     "channel": "ticker",
-                    "symbol": symbols  # Send all symbols at once
+                    "symbol": symbols
                 }
             }
             await self.public_websocket.send(json.dumps(unsubscribe_message))
@@ -810,7 +829,7 @@ class KrakenWebSocketClient:
                     'volume': ticker_data.get('volume'),
                     'vwap': ticker_data.get('vwap')
                 }
-                print(f"TICKER: {symbol} Last={ticker_data.get('last')} Bid={ticker_data.get('bid')} Ask={ticker_data.get('ask')}")
+                #print(f"TICKER: {symbol} Last={ticker_data.get('last')} Bid={ticker_data.get('bid')} Ask={ticker_data.get('ask')}")
                 update_portfolio = True
             
             # Update portfolio value if enough time has passed
@@ -830,17 +849,13 @@ class KrakenWebSocketClient:
     """
     async def handle_execution_updates(self, data):
         """Handle incoming execution updates."""
-        #print(f"Received execution update: {data}")
-        
         if data.get('type') == 'snapshot':
-            # Clear existing orders and replace with snapshot
             self.orders = {}
             for execution in data.get('data', []):
                 if execution.get('order_status') in ['new', 'partially_filled']:
                     order_id = execution.get('order_id')
                     if order_id:
                         self.orders[order_id] = execution
-                        print(f"ORDERS: Added order {order_id} for {execution.get('symbol')}")
         
         elif data.get('type') == 'update':
             for execution in data.get('data', []):
@@ -850,34 +865,20 @@ class KrakenWebSocketClient:
                     
                 exec_type = execution.get('exec_type')
                 order_status = execution.get('order_status')
-                
-                print(f"Processing execution update: ID={order_id} Type={exec_type} Status={order_status}")
+                symbol = execution.get('symbol')
                 
                 if exec_type in ['filled', 'canceled', 'expired']:
-                    # Remove completed orders
                     if order_id in self.orders:
                         removed_order = self.orders.pop(order_id)
-                        print(f"Removed {exec_type} order {order_id} for {removed_order.get('symbol')}")
+                        log_info(f"Order {order_id} for {removed_order.get('symbol')} {exec_type}")
                 elif exec_type in ['new', 'pending_new']:
-                    # For new orders, merge with existing data if available
                     if order_id in self.orders:
                         self.orders[order_id].update(execution)
                     else:
-                        # If this is first time seeing order, store complete execution data
                         self.orders[order_id] = execution
-                    print(f"{'Updated' if order_id in self.orders else 'Added new'} order {order_id} for {execution.get('symbol')}")
+                        log_info(f"New order {order_id} for {symbol}")
                 elif order_id in self.orders:
-                    # Update existing orders with new data
                     self.orders[order_id].update(execution)
-                    print(f"Updated order {order_id} status: {order_status}")
-        
-        # Debug print current orders
-        print("\nCurrent open orders:")
-        for order_id, order in self.orders.items():
-            symbol = order.get('symbol', 'None')
-            side = order.get('side', 'None')
-            status = order.get('order_status', 'None')
-            print(f"ORDER: {order_id}: {symbol} {side} {status}")
 
     """
     Formats and prints execution details for logging purposes.
@@ -915,7 +916,6 @@ class KrakenWebSocketClient:
     async def handle_execution_message(self, message):
         """Handle execution messages for order updates."""
         if message['type'] == 'snapshot':
-            # Clear existing orders and replace with snapshot
             self.orders = {}
             for execution in message['data']:
                 if execution['order_status'] not in ['filled', 'canceled', 'expired']:
@@ -990,6 +990,18 @@ class KrakenGridBot:
             pair: {'buy': None, 'sell': None} 
             for pair in TRADING_PAIRS.keys()
         }
+
+    def format_price_for_pair(self, trading_pair: str, price: float) -> float:
+        """Format price with appropriate precision for each trading pair."""
+        # Get precision from trading pair settings, default to 2 if not found
+        precision = TRADING_PAIRS.get(trading_pair, {}).get('precision', 2)
+        
+        # Format the price with the specified precision
+        formatted_price = float(f"{price:.{precision}f}")
+        
+        print(f"Formatted {trading_pair} price from {price} to {formatted_price} with {precision} decimals")
+        return formatted_price
+
     """
     Initialize and start the grid trading strategy.
     
@@ -1001,9 +1013,11 @@ class KrakenGridBot:
     """
     async def start(self):
         """Initialize and start the grid trading strategy."""
-        # Set up handlers for order updates and market data
-
-        # Initialize orders for each trading pair
+        # Subscribe to all trading pairs defined in configuration
+        trading_pairs = list(TRADING_PAIRS.keys())
+        print(f"DEBUG: Subscribing to trading pairs: {trading_pairs}")
+        await self.client.subscribe_ticker(trading_pairs)
+        
         print("Starting grid bot monitoring...")
     
     """
@@ -1084,7 +1098,8 @@ class KrakenGridBot:
     """
     async def check_open_orders(self, trading_pair: str):
         """Check if there are any open orders for a trading pair."""
-        #print(f"Checking open orders for {trading_pair}")
+        print(f"\nDEBUG: Checking open orders for {trading_pair}")
+        print(f"DEBUG: Current orders in memory: {len(self.client.orders)}")
         
         # Filter orders for the specified trading pair that are open
         open_orders = [
@@ -1095,6 +1110,17 @@ class KrakenGridBot:
                 order.get('order_id'))
         ]
         
+        # Debug logging for found orders
+        if open_orders:
+            print(f"DEBUG: Found {len(open_orders)} open orders for {trading_pair}:")
+            for order in open_orders:
+                print(f"DEBUG: Order ID: {order.get('order_id')}")
+                print(f"DEBUG: Status: {order.get('order_status')}")
+                print(f"DEBUG: Side: {order.get('side')}")
+                print(f"DEBUG: Price: {order.get('limit_price')}")
+        else:
+            print(f"DEBUG: No open orders found for {trading_pair}")
+
         # If no open buy orders exist, place new order
         if not open_orders:
             print(f"No buy orders found for {trading_pair}")
@@ -1151,7 +1177,7 @@ class KrakenGridBot:
         trail_interval = self.grid_settings[trading_pair]['trail_interval']
         
         # Calculate the maximum allowed distance (grid + trail)
-        max_interval = current_market_price * ((grid_interval + trail_interval) / 100)
+        max_interval = current_market_price * ((grid_interval + trail_interval) / 100) # TESTING: NO TRAIL, GRID INTERVAL LIKE GOOD OL DAYS FOR FASTER ACCUMULATION IN BULL MARKET CONDITIONS
         
         # For buy orders, check if the order is too far from current market price
         if is_buy_order:
@@ -1161,7 +1187,7 @@ class KrakenGridBot:
             if price_difference > max_interval:
                 print(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
                 # Set new price at exactly grid + trail interval below current price
-                target_price = current_market_price - max_interval
+                target_price = current_market_price - max_interval  # This is correct - using full interval for updates
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
             else:
@@ -1185,15 +1211,19 @@ class KrakenGridBot:
         Exception: If update fails
     """
     async def update_order_price(self, trading_pair: str, order: dict, new_price: float):
-        #print(f"Updating order price for {trading_pair}")
-        
         if not order or not order.get('order_id'):
             print("No valid order provided to update")
             return None
         
         try:
-            # Format price to proper number of decimal places
-            formatted_price = f"{new_price:.1f}"
+            # Format price based on trading pair
+            if trading_pair == "XRP/USD":
+                formatted_price = f"{new_price:.5f}"  # 5 decimal places for XRP/USD
+            elif trading_pair == "BTC/USD":
+                formatted_price = f"{new_price:.1f}"  # 1 decimal place for BTC/USD
+            else:
+                formatted_price = f"{new_price:.2f}"  # 2 decimal places for others
+            
             req_id = int(time.time() * 1000)
             
             # Create amend order message with all required parameters
@@ -1249,13 +1279,13 @@ class KrakenGridBot:
         
         if current_time - last_order_time < GRID_DECAY_TIME:
             time_left = GRID_DECAY_TIME - (current_time - last_order_time)
-            print(f"Decay timer active for {trading_pair}. {time_left:.1f}s remaining")
+            log_info(f"Decay timer active for {trading_pair}. {time_left:.1f}s remaining")
             return
             
-        print(f"Executing trade strategy for {trading_pair}")
+        log_info(f"Executing trade strategy for {trading_pair}")
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
-            print(f"No ticker data available for {trading_pair}")
+            log_error(f"No ticker data available for {trading_pair}")
             return
         
         # Update last order time before placing orders
@@ -1275,9 +1305,9 @@ class KrakenGridBot:
         buy_price = current_price - interval_amount
         sell_price = current_price + interval_amount
         
-        # Format prices to appropriate decimal places
-        buy_price = float(f"{buy_price:.1f}")
-        sell_price = float(f"{sell_price:.1f}")
+        # Format prices using the precision from TRADING_PAIRS configuration
+        buy_price = self.format_price_for_pair(trading_pair, buy_price)
+        sell_price = self.format_price_for_pair(trading_pair, sell_price)
         
         try:
             # Generate request ID for buy order
@@ -1290,63 +1320,78 @@ class KrakenGridBot:
                     "order_type": "limit",
                     "side": "buy",
                     "symbol": trading_pair,
-                    "order_qty": buy_amount,  # Use the correct buy size
+                    "order_qty": buy_amount,
                     "limit_price": buy_price,
                     "token": await self.client.get_ws_token()
                 },
                 "req_id": buy_req_id
             }
             
-            print(f"ORDER: Placing buy order for {trading_pair}, Current price: ${current_price:.2f}, "
-                  f"Grid interval: ${interval_amount:.2f}, Buy price: ${buy_price:.2f}, "
-                  f"Buy quantity: {buy_amount}")
+            log_info(f"Placing buy order for {trading_pair} - Price: ${buy_price:.2f}, Quantity: {buy_amount}")
             
-            # Send buy order and wait for response
-            await self.client.websocket.send(json.dumps(buy_order_msg))
-            buy_response = await self.client.wait_for_response(buy_req_id)
-            
-            if buy_response and buy_response.get('success'):
-                order_id = buy_response.get('result', {}).get('order_id')
-                if order_id:
-                    # Add order ID to grid settings tracking
-                    self.grid_settings[trading_pair]['active_orders'].add(order_id)
-                    # Update grid orders tracking
-                    self.grid_orders[trading_pair]['buy'] = order_id
-                    print(f"Grid buy order placed for {trading_pair} with ID: {order_id}")
+            try:
+                await self.client.websocket.send(json.dumps(buy_order_msg))
+                buy_response = await self.client.wait_for_response(buy_req_id)
+                
+                if not buy_response:
+                    log_error(f"No response received for buy order on {trading_pair}")
+                    return
                     
-                    # Try to place corresponding sell order
-                    try:
-                        sell_req_id = int(time.time() * 1000)
-                        sell_order_msg = {
-                            "method": "add_order",
-                            "params": {
-                                "order_type": "limit",
-                                "side": "sell",
-                                "symbol": trading_pair,
-                                "order_qty": sell_amount,  # Use the correct sell size
-                                "limit_price": sell_price,
-                                "token": await self.client.get_ws_token()
-                            },
-                            "req_id": sell_req_id
-                        }
+                if not buy_response.get('success'):
+                    error_msg = buy_response.get('error', 'Unknown error')
+                    log_error(f"Buy order failed for {trading_pair}: {error_msg}")
+                    return
+                    
+                order_id = buy_response.get('result', {}).get('order_id')
+                if not order_id:
+                    log_error(f"No order ID received for {trading_pair}")
+                    return
+                    
+                self.grid_settings[trading_pair]['active_orders'].add(order_id)
+                self.grid_orders[trading_pair]['buy'] = order_id
+                log_success(f"Grid buy order placed for {trading_pair} with ID: {order_id}")
+                
+                # Try to place corresponding sell order
+                try:
+                    sell_req_id = int(time.time() * 1000)
+                    sell_order_msg = {
+                        "method": "add_order",
+                        "params": {
+                            "order_type": "limit",
+                            "side": "sell",
+                            "symbol": trading_pair,
+                            "order_qty": sell_amount,
+                            "limit_price": sell_price,
+                            "token": await self.client.get_ws_token()
+                        },
+                        "req_id": sell_req_id
+                    }
+                    
+                    log_info(f"Placing sell order for {trading_pair} - Price: ${sell_price:.2f}, Quantity: {sell_amount}")
+                    
+                    await self.client.websocket.send(json.dumps(sell_order_msg))
+                    sell_response = await self.client.wait_for_response(sell_req_id)
+                    
+                    if sell_response and sell_response.get('success'):
+                        sell_order_id = sell_response.get('result', {}).get('order_id')
+                        if sell_order_id:
+                            self.grid_orders[trading_pair]['sell'] = sell_order_id
+                            log_success(f"Grid sell order placed for {trading_pair} with ID: {sell_order_id}")
+                        else:
+                            log_warning(f"Sell order placed but no ID received for {trading_pair}")
+                    else:
+                        log_info(f"Could not place sell order for {trading_pair} (likely insufficient funds)")
                         
-                        print(f"ORDER: Placing corresponding sell order, Sell price: ${sell_price:.2f}, "
-                              f"Sell quantity: {sell_amount}")
-                        
-                        await self.client.websocket.send(json.dumps(sell_order_msg))
-                        # We don't track the response for sell orders
-                        
-                    except Exception as sell_error:
-                        # Ignore sell order errors (likely insufficient funds)
-                        print(f"Note: Could not place sell order (likely insufficient funds)")
-                        
-                else:
-                    print(f"ORDER: placed but no order ID received in response: {buy_response}")
-            else:
-                print(f"Failed to place buy order: {buy_response}")
-            
+                except Exception as sell_error:
+                    log_error(f"Error placing sell order for {trading_pair}: {str(sell_error)}")
+                    
+            except Exception as send_error:
+                log_error(f"Error sending buy order for {trading_pair}: {str(send_error)}")
+                
         except Exception as e:
-            print(f"Error placing orders for {trading_pair}: {str(e)}")
+            log_error(f"Critical error placing orders for {trading_pair}: {str(e)}")
+            # Reset the decay timer on error
+            self.grid_settings[trading_pair]['last_order_time'] = 0
 
     """
     Calculates the optimal sell amount to ensure minimum profit after fees.
