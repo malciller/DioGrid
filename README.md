@@ -1,4 +1,3 @@
-
 # DioGrid
 Follow DioGrid's Performance: https://portfolio.diophantsolutions.com
 
@@ -18,6 +17,8 @@ For more details about Kraken's API, visit: https://docs.kraken.com/api/
 - **Dynamic Grid Adjustment**: Automatically adjusts orders to maintain optimal grid spacing
 - **Portfolio Tracking**: Monitors total portfolio value and tracks historical highs
 - **Error Recovery**: Automatically handles connection issues and order placement failures
+- **Automated Staking**: Automatically stakes eligible assets in real-time as they accumulate
+- **Compound Returns**: Combines trading profits with staking rewards for enhanced yield
 
 ## Project Structure
 
@@ -65,17 +66,86 @@ The bot's behavior is controlled by global variables at the top of `diogrid.py`.
 Key settings include:
 
 ```python
-MIN_PROFIT_USD = 0.01              # Minimum profit target per trade in USD, bot will subtract the difference from the sell quantities, and you'll begin accumulating holdings of the assets
-KRAKEN_FEE = 0.002                 # Trading fee percentage
-STARTING_PORTFOLIO_INVESTMENT = 500.0  # Initial investment for profit tracking
-PROFIT_INCREMENT = 5               # USD amount for profit-taking orders
-GRID_INTERVAL = 0.6               # Percentage between grid lines
-GRID_INTERVAL_GRACE = 0.05        # Additional grace percentage for grid
+# TRADING CONFIGURATION
+PASSIVE_INCOME = 0 # 1 for True, 0 for False
+KRAKEN_FEE = 0.002 # Your Kraken Maker Fee
+STARTING_PORTFOLIO_INVESTMENT = 2700.0 # Starting USD portfolio balance
+PROFIT_INCREMENT = 10 # Profit taking increment in USDC, ignored if PASSIVE_INCOME = 0
+SELL_AMOUNT_MULTIPLIER = 0.999 # Multiplier for sell order size
 TRADING_PAIRS = {
-    "BTC/USD": 0.0001,            # Trading pairs and amounts
-    #"SOL/USD": 0.04              # Commented example
+    pair: {
+        'size': size, # Buy order size
+        'grid_interval': grid, # Grid interval
+        'grid_spacing': spacing, # Grid spacing
+        'trail_interval': spacing, # Trail interval, secondary buffer for grid spacing to avoid over trading
+        'precision': precision # Asset decimal price precision
+    }
+    for pair, (size, grid, spacing, precision) in {
+        "BTC/USD": (0.00085, 0.75, 0.75, 1), 
+        "SOL/USD": (0.06, 1.5, 1.5, 2),   
+        "XRP/USD": (5.0, 2.5, 2.5, 5),        
+        "ADA/USD": (18.0, 3.5, 3.5, 6), 
+        "ETH/USD": (0.0045, 3.5, 3.5, 2),  
+        "TRX/USD": (55.0, 2.5, 2.5, 6),     
+        "DOT/USD": (2.5, 2.5, 2.5, 4), 
+        "KSM/USD": (0.6, 2.5, 2.5, 2), 
+    }.items()
 }
 ```
+
+### Parameter Details
+
+#### Trading Mode Parameters
+- **PASSIVE_INCOME**: Controls the bot's trading strategy
+  - `0`: Asset Accumulation Mode
+    - Sells 99.9% (with SELL_AMOUNT_MULTIPLIER = 0.999) of bought volume
+    - Accumulates 0.1% of each trade in the traded asset
+    - Example: Buying 1 BTC will sell 0.999 BTC, keeping 0.001 BTC
+  - `1`: USDC Profit Mode
+    - Sells 100% of bought volume (with SELL_AMOUNT_MULTIPLIER = 1)
+    - Takes profits in USDC when portfolio reaches new highs
+    - Example: When portfolio increases by PROFIT_INCREMENT ($10), buys $10 USDC
+
+#### Fee and Profit Parameters
+- **KRAKEN_FEE**: Your Kraken maker fee rate
+  - Default: 0.002 (0.2%)
+  - Affects minimum profitable grid spacing
+  - Example: With 0.2% fee, minimum grid spacing should be >0.4% for profit
+
+#### Grid Trading Parameters
+- **GRID_INTERVAL**: Percentage between orders
+  - Example: 0.75% for BTC means orders every $750 at $100,000 BTC price
+  - Lower intervals = more frequent trades but smaller profits
+  - Higher intervals = larger profits but fewer trades
+  - Should be at least 2x KRAKEN_FEE for profitability
+
+- **GRID_SPACING**: Minimum price movement required for new orders
+  - Prevents excessive trading in volatile conditions
+  - Example: 0.75% spacing means price must move 0.75% from last trade
+  - Usually set equal to GRID_INTERVAL for optimal performance
+
+- **TRAIL_INTERVAL**: Secondary buffer for grid spacing
+  - Provides additional protection against over-trading
+  - Example: 0.75% means new orders wait for 0.75% price movement
+  - Typically set equal to GRID_SPACING
+
+#### Portfolio Management
+- **STARTING_PORTFOLIO_INVESTMENT**: Initial portfolio value
+  - Used as baseline for profit tracking
+  - Example: $2700 starting value, tracks profits from this point
+
+- **PROFIT_INCREMENT**: USDC profit-taking amount
+  - Only active when PASSIVE_INCOME = 1
+  - Example: $10 means buy $10 USDC when portfolio increases by $10
+  - Smaller increments = more frequent USDC purchases
+  - Larger increments = bigger but less frequent purchases
+
+#### Trading Pair Configuration
+Example for BTC/USD: (0.00085, 0.75, 0.75, 1)
+- Size (0.00085): Buy order volume in base currency
+- Grid (0.75): 0.75% spacing between orders
+- Spacing (0.75): 0.75% minimum price movement needed
+- Precision (1): Decimal places for price ($30,500.1)
 
 Update these parameters to match your desired trading setup.
 
@@ -212,6 +282,39 @@ Profit-taking events trigger email notifications including:
 - Smaller increments = more frequent USDC purchases
 - Larger increments = less frequent but bigger purchases
 - Consider exchange fees when setting increment size
+
+## Automated Staking
+
+DioGrid now includes automatic staking functionality for US customers, following Kraken's reintroduction of staking services:
+
+### How It Works
+
+1. **Stakeable Asset Detection**
+   - Bot continuously monitors for assets eligible for staking
+   - Automatically identifies which holdings can be staked on Kraken
+
+2. **Real-time Staking**
+   - Checks for residual balances after grid orders are placed
+   - Automatically sweeps stakeable assets to the earn staking wallet
+   - Occurs in real-time as trades execute
+
+3. **Accumulation Mode Integration**
+   - When running in accumulation mode (PASSIVE_INCOME = 0)
+   - Newly accumulated assets are automatically staked
+   - Provides additional passive income through staking rewards
+
+4. **Compound Returns**
+   - Combines trading profits with staking rewards
+   - Staking rewards automatically compound as they're earned
+   - Maximizes overall portfolio yield through dual revenue streams
+
+### Benefits
+
+- Passive income from both trading and staking
+- No manual staking management required
+- Real-time asset optimization
+- Automated compound returns
+- Enhanced portfolio yield potential
 
 ## License
 

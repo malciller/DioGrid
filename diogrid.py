@@ -15,9 +15,11 @@ from email.mime.multipart import MIMEMultipart
 
 
 # TRADING CONFIGURATION
+PASSIVE_INCOME = 0 # 0 = accumulation trading, 1 = take profit in USDC
 KRAKEN_FEE = 0.002 # current Kraken maker fee
-STARTING_PORTFOLIO_INVESTMENT = 2500.0 # Starting USD portfolio balance
-PROFIT_INCREMENT = 10 # Dollar amount in realized portfolio value to take profit in USDC
+STARTING_PORTFOLIO_INVESTMENT = 2700.0 # Starting USD portfolio balance
+PROFIT_INCREMENT = 10 # Profit taking increment in USDC, ignored if PASSIVE_INCOME = 0
+SELL_AMOUNT_MULTIPLIER = 0.999 # Multiplier for sell order size
 TRADING_PAIRS = {
     pair: {
         'size': size,
@@ -27,16 +29,14 @@ TRADING_PAIRS = {
         'precision': precision
     }
     for pair, (size, grid, spacing, precision) in {
-        "BTC/USD": (0.00072, 0.75, 0.75, 1),    # $70.00 @ 2.8x
-        "ETH/USD": (0.0035, 2.5, 2.5, 2),       
-        "SOL/USD": (0.06, 2.5, 1.5, 2),        
-        "XRP/USD": (5.0, 2.5, 1.5, 5),          
-        "ADA/USD": (12.0, 2.5, 2.5, 6),          
-        "TRX/USD": (50.0, 2.5, 2.5, 6),         
-        "AVAX/USD": (0.35, 2.5, 2.5, 2),  
-        "LINK/USD": (0.5, 2.5, 2.5, 5),      
-        #"XLM/USD": (27.0, 2.5, 2.5, 6),          
-        #"SUI/USD": (2.5, 2.5, 2.5, 4),  
+        "BTC/USD": (0.00085, 0.75, 0.75, 1), # $80.00 @ 3.2x (0.00025 @ 1.0x @ $100k)
+        "SOL/USD": (0.06, 1.5, 1.5, 2), # 13-16%      
+        "XRP/USD": (5.0, 2.5, 2.5, 5), # 0%          
+        "ADA/USD": (18.0, 3.5, 3.5, 6), # 2-5% 
+        "ETH/USD": (0.0045, 3.5, 3.5, 2), # 2-7%   
+        "TRX/USD": (55.0, 2.5, 2.5, 6), # 4-7%      
+        "DOT/USD": (2.5, 2.5, 2.5, 4), # 12-18% 
+        "KSM/USD": (0.6, 2.5, 2.5, 2), # 16-24%
     }.items()
 }
 
@@ -104,18 +104,15 @@ class KrakenAPIError(Exception):
             'EGeneral:Temporary lockout': 'Too many sequential EAPI:Invalid key errors',
             'EGeneral:Permission denied': 'API key lacks required permissions',
             'EGeneral:Internal error': 'Internal error. Please contact support',
-
             # Service Errors
             'EService:Unavailable': 'The matching engine or API is offline',
             'EService:Market in cancel_only mode': 'Request cannot be made at this time',
             'EService:Market in post_only mode': 'Request cannot be made at this time',
             'EService:Deadline elapsed': 'The request timed out according to the default or specified deadline',
-
             # API Authentication Errors
             'EAPI:Invalid key': 'Invalid API key provided',
             'EAPI:Invalid signature': 'Invalid API signature',
             'EAPI:Invalid nonce': 'Invalid nonce value',
-
             # Order Errors
             'EOrder:Cannot open opposing position': 'User/tier is ineligible for margin trading',
             'EOrder:Cannot open position': 'User/tier is ineligible for margin trading',
@@ -137,22 +134,17 @@ class KrakenAPIError(Exception):
             'EOrder:Reduce only:Position is closed': 'Reduce-only order would flip position',
             'EOrder:Scheduled orders limit exceeded': 'Maximum scheduled orders limit exceeded',
             'EOrder:Unknown position': 'Position not found',
-
             # Account Errors
             'EAccount:Invalid permissions': 'Account has invalid permissions',
-
             # Authentication Errors
             'EAuth:Account temporary disabled': 'Account is temporarily disabled',
             'EAuth:Account unconfirmed': 'Account is not confirmed',
             'EAuth:Rate limit exceeded': 'Authentication rate limit exceeded',
             'EAuth:Too many requests': 'Too many authentication requests',
-
             # Trade Errors
             'ETrade:Invalid request': 'Invalid trade request',
-
             # Business/Regulatory Errors
             'EBM:limit exceeded:CAL': 'Exceeded Canadian Acquisition Limits',
-
             # Funding Errors
             'EFunding:Max fee exceeded': 'Processed fee exceeds max_fee set in Withdraw request'
         }
@@ -196,6 +188,10 @@ class KrakenWebSocketClient:
         self.ticker_subscriptions = {}  # Track individual ticker subscriptions
         self.public_message_task = None
         self.email_manager = EmailManager()
+        # Add new attributes for earn strategies
+        self.earn_strategies = {}  # Store strategy details by asset
+        self.strategy_ids = {}     # Store strategy IDs by asset
+        self.earn_balances = {}  # Add new attribute to track earn balances
 
     """
     Generates a Kraken API signature for authentication.
@@ -263,13 +259,15 @@ class KrakenWebSocketClient:
     async def connect(self):
         """Connect to Kraken's WebSocket APIs."""
         try:
-            # Connect to authenticated endpoint
+            # Get WebSocket token and connect
             token = await self.get_ws_token()
             if not token:
                 raise KrakenAPIError('EAPI:Invalid key', 'Failed to obtain WebSocket token')
-            self.websocket = await websockets.connect(self.ws_auth_url)
+                
+            # Fetch earn strategies before establishing connections
+            await self.get_earn_strategies()
             
-            # Connect to public endpoint
+            self.websocket = await websockets.connect(self.ws_auth_url)
             self.public_websocket = await websockets.connect(self.ws_public_url)
             
             # Start maintenance tasks
@@ -278,9 +276,9 @@ class KrakenWebSocketClient:
             self.public_message_task = asyncio.create_task(self.handle_public_messages())
             
             return token
+            
         except Exception as e:
             Logger.error(f"Error during connection: {str(e)}")
-            # Clean up any partially created tasks/connections
             await self.disconnect()
             raise
 
@@ -638,8 +636,10 @@ class KrakenWebSocketClient:
         Logger.info(f"Portfolio Value: ${total_value:,.2f} ({current_time})")
         
         # Check if we should take profit
-        # IMPORTANT DO NOT DELETE THIS, commented out for compounding returns, will be used in future
-        #await self.check_and_take_profit()
+        if PASSIVE_INCOME == 1:
+            await self.check_and_take_profit()
+        else:
+            return
 
     """
     Monitors portfolio value and executes profit-taking orders when targets are met.
@@ -713,13 +713,41 @@ class KrakenWebSocketClient:
             assets_with_balance = set()
             
             # Process all balances in the update
-            for asset in data.get('data', []):
-                asset_code = asset.get('asset')
-                balance = float(asset.get('balance', 0))
-                self.balances[asset_code] = balance
+            Logger.info(f"Balance update received - Type: {data.get('type')}")
+            Logger.info(f"Raw balance data: {json.dumps(data, indent=2)}")
+            
+            for asset_data in data.get('data', []):
+                asset_code = asset_data.get('asset')
+                
+                # Reset earn balance for this asset
+                self.earn_balances[asset_code] = 0.0
+                
+                # Process wallets
+                wallets = asset_data.get('wallets', [])
+                
+                if wallets:
+                    # If we have wallet data, process each wallet
+                    Logger.info(f"Wallets for {asset_code}:")
+                    for wallet in wallets:
+                        wallet_type = wallet.get('type')
+                        wallet_balance = float(wallet.get('balance', 0))
+                        Logger.info(f"  Wallet type: {wallet_type}, Balance: {wallet_balance}")
+                        
+                        # Store earn wallet balances separately
+                        if wallet_type == 'earn' or wallet_type == 'bonded' or wallet_type == 'locked':
+                            self.earn_balances[asset_code] = wallet_balance
+                            
+                    total_balance = float(asset_data.get('balance', 0))
+                else:
+                    # Fallback to legacy format if no wallets field
+                    total_balance = float(asset_data.get('balance', 0))
+                    Logger.info(f"Legacy format for {asset_code} - Balance: {total_balance}")
+                
+                self.balances[asset_code] = total_balance
+                Logger.info(f"Total balance for {asset_code}: {total_balance}")
                 
                 # Add to tracking set if non-zero balance and not USD
-                if balance > 0 and asset_code != 'USD':
+                if total_balance > 0 and asset_code != 'USD':
                     assets_with_balance.add(asset_code)
             
             # Now check all known balances for non-zero amounts
@@ -727,6 +755,8 @@ class KrakenWebSocketClient:
             for asset_code, balance in self.balances.items():
                 if balance > 0 and asset_code != 'USD':
                     assets_with_balance.add(asset_code)
+            
+            Logger.info(f"Assets with non-zero balances: {assets_with_balance}")
             
             # Convert assets to trading pairs
             new_trading_pairs = {f"{asset}/USD" for asset in assets_with_balance}
@@ -742,6 +772,7 @@ class KrakenWebSocketClient:
                 await self.subscribe_ticker(list(pairs_to_add))
             
             self.active_trading_pairs = new_trading_pairs
+            Logger.info(f"Active trading pairs after update: {self.active_trading_pairs}")
             
             # Calculate portfolio value after balance update
             await self.calculate_portfolio_value()
@@ -975,6 +1006,107 @@ class KrakenWebSocketClient:
             # Clean up future
             self._response_futures.pop(req_id, None)
 
+    async def get_earn_strategies(self):
+        """Fetch available earn strategies from Kraken."""
+        path = "/0/private/Earn/Strategies"
+        url = self.rest_url + path
+        nonce = str(int(time.time() * 1000))
+
+        post_data = {
+            "nonce": nonce,
+        }
+        
+        headers = {
+            "API-Key": self.api_key,
+            "API-Sign": self.get_kraken_signature(path, post_data),
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, data=post_data) as response:
+                    if response.status != 200:
+                        raise KrakenAPIError('EService:Unavailable', f"HTTP request failed: {response.status}")
+                    
+                    result = await response.json()
+                    if 'error' in result and result['error']:
+                        error_code = result['error'][0]
+                        raise KrakenAPIError(error_code)
+
+                    # Process and store strategies
+                    strategies = result.get('result', {}).get('items', [])
+                    for strategy in strategies:
+                        asset = strategy.get('asset')
+                        if asset:
+                            self.earn_strategies[asset] = {
+                                'id': strategy.get('id'),
+                                'apr_estimate': strategy.get('apr_estimate'),
+                                'lock_type': strategy.get('lock_type', {}).get('type'),
+                                'can_allocate': strategy.get('can_allocate', False),
+                                'min_allocation': strategy.get('user_min_allocation'),
+                                'user_cap': strategy.get('user_cap')
+                            }
+                            self.strategy_ids[asset] = strategy.get('id')
+                            
+                    Logger.info(f"Fetched {len(self.earn_strategies)} earn strategies")
+                    Logger.info("Available earn strategies:")
+                    for asset, details in self.earn_strategies.items():
+                        apr_range = details.get('apr_estimate', {})
+                        apr_low = apr_range.get('low', 'N/A')
+                        apr_high = apr_range.get('high', 'N/A')
+                        Logger.info(f"{asset}: ID={details['id']}, APR={apr_low}-{apr_high}%, Type={details['lock_type']}")
+                    
+                    return self.earn_strategies
+
+        except aiohttp.ClientError as e:
+            raise KrakenAPIError('EService:Unavailable', f"HTTP request failed: {str(e)}")
+        except Exception as e:
+            raise KrakenAPIError('EGeneral:Internal error', str(e))
+
+    async def get_available_spot_balance(self, asset: str) -> float:
+        """
+        Calculate available spot balance for an asset by checking:
+        1. Total balance
+        2. Subtracting amount in open sell orders
+        3. Subtracting amount in earn wallet
+        
+        Args:
+            asset (str): Asset code (e.g., 'BTC', 'ETH')
+            
+        Returns:
+            float: Available spot balance
+        """
+        try:
+            # Get total balance for the asset
+            total_balance = self.balances.get(asset, 0.0)
+            if total_balance <= 0:
+                return 0.0
+
+            # Calculate amount in open sell orders
+            amount_in_orders = 0.0
+            for order in self.orders.values():
+                if (order.get('symbol', '').startswith(asset + '/') and 
+                    order.get('side') == 'sell' and
+                    order.get('order_status') in ['new', 'partially_filled']):
+                    amount_in_orders += float(order.get('order_qty', 0.0))
+
+            # Get amount in earn wallet
+            amount_in_earn = self.earn_balances.get(asset, 0.0)
+
+            # Calculate available balance
+            available_balance = total_balance - amount_in_orders - amount_in_earn
+            
+            Logger.info(f"\nSpot balance breakdown for {asset}:")
+            Logger.info(f"  Total balance: {total_balance}")
+            Logger.info(f"  In sell orders: {amount_in_orders}")
+            Logger.info(f"  In earn wallet: {amount_in_earn}")
+            Logger.info(f"  Available: {available_balance}")
+            
+            return max(0.0, available_balance)
+
+        except Exception as e:
+            Logger.error(f"Error calculating available balance for {asset}: {str(e)}")
+            return 0.0
+
 
 class KrakenGridBot:
     def __init__(self, client: KrakenWebSocketClient):
@@ -1107,6 +1239,12 @@ class KrakenGridBot:
         Logger.info(f"\nDEBUG: Checking open orders for {trading_pair}")
         Logger.info(f"DEBUG: Current orders in memory: {len(self.client.orders)}")
         
+        # Get the asset code from the trading pair (e.g., 'BTC' from 'BTC/USD')
+        asset = trading_pair.split('/')[0]
+        
+        # Check and log available spot balance
+        available_balance = await self.client.get_available_spot_balance(asset)
+        
         # Filter orders for the specified trading pair that are open
         open_orders = [
             order for order in self.client.orders.values()
@@ -1124,21 +1262,67 @@ class KrakenGridBot:
                 Logger.info(f"DEBUG: Status: {order.get('order_status')}")
                 Logger.info(f"DEBUG: Side: {order.get('side')}")
                 Logger.info(f"DEBUG: Price: {order.get('limit_price')}")
-        else:
-            Logger.info(f"DEBUG: No open orders found for {trading_pair}")
 
-        # If no open buy orders exist, place new order
-        if not open_orders:
-            Logger.info(f"No buy orders found for {trading_pair}")
+            # Check if we have available balance to stake and if asset has an earn strategy
+            if available_balance > 0 and asset in self.client.earn_strategies:
+                strategy = self.client.earn_strategies[asset]
+                
+                # Get minimum allocation from strategy
+                min_allocation = float(strategy['min_allocation'])
+                
+                if strategy.get('can_allocate') and available_balance >= min_allocation:
+                    Logger.info(f"Found stakeable {asset} balance: {available_balance} (min: {min_allocation})")
+                    
+                    # Format amount to match asset precision
+                    formatted_amount = f"{available_balance:.8f}".rstrip('0').rstrip('.')
+                    
+                    # Prepare allocation request
+                    nonce = str(int(time.time() * 1000))
+                    path = "/0/private/Earn/Allocate"
+                    
+                    post_data = {
+                        "nonce": nonce,
+                        "strategy_id": strategy['id'],
+                        "amount": formatted_amount
+                    }
+                    
+                    url = self.client.rest_url + path
+                    headers = {
+                        "API-Key": self.client.api_key,
+                        "API-Sign": self.client.get_kraken_signature(path, post_data)
+                    }
+                    
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(url, headers=headers, data=post_data) as response:
+                                result = await response.json()
+                                
+                                if result.get('error'):
+                                    Logger.error(f"Error allocating {asset} to earn: {result['error']}")
+                                else:
+                                    Logger.success(f"Successfully initiated earn allocation for {formatted_amount} {asset}")
+                    except Exception as e:
+                        Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
+                else:
+                    if not strategy.get('can_allocate'):
+                        Logger.info(f"{asset} earn strategy not currently accepting allocations")
+                    elif available_balance < min_allocation:
+                        Logger.info(f"{asset} available balance ({available_balance}) below minimum allocation ({min_allocation})")
+            else:
+                if available_balance <= 0:
+                    Logger.info(f"No available balance to stake for {asset}")
+                elif asset not in self.client.earn_strategies:
+                    Logger.info(f"No earn strategy available for {asset}")
+
+        else:
+            Logger.info(f"No open orders found for {trading_pair}")
             await self.place_orders(trading_pair)
             return None
 
         # If multiple buy orders exist (shouldn't happen), keep most recent
         if len(open_orders) > 1:
             Logger.warning(f"Warning: Found {len(open_orders)} buy orders for {trading_pair}")
-            # Keep most recent buy order
             kept_order = sorted(open_orders, key=lambda x: x.get('time', 0), reverse=True)[0]
-            # Cancel others
             for order in open_orders:
                 if order['order_id'] != kept_order['order_id']:
                     await self.cancel_order(order['order_id'])
@@ -1304,7 +1488,7 @@ class KrakenGridBot:
         buy_amount = TRADING_PAIRS[trading_pair]['size']
         
         # Calculate optimal sell amount
-        sell_amount = buy_amount * 0.999
+        sell_amount = buy_amount * SELL_AMOUNT_MULTIPLIER
         
         # Calculate grid prices
         interval_amount = current_price * (grid_interval / 100)
