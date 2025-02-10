@@ -191,7 +191,7 @@ class KrakenWebSocketClient:
         # Add new attributes for earn strategies
         self.earn_strategies = {}  # Store strategy details by asset
         self.strategy_ids = {}     # Store strategy IDs by asset
-        self.earn_balances = {}  # Add new attribute to track earn balances
+        self.earn_balances = {}  
         self.subscribed_channels = set()  # Track which channels are already subscribed
         self.subscription_lock = asyncio.Lock()  # Add lock for thread-safe subscription management
         self.subscription_retry_delay = 1  # Delay between subscription attempts
@@ -744,27 +744,30 @@ class KrakenWebSocketClient:
                 
                 # Process wallets
                 wallets = asset_data.get('wallets', [])
+                total_balance = 0.0
                 
                 if wallets:
                     # If we have wallet data, process each wallet
-                    #Logger.info(f"Wallets for {asset_code}:")
+                    #Logger.info(f"Processing wallets for {asset_code}:")
                     for wallet in wallets:
                         wallet_type = wallet.get('type')
                         wallet_balance = float(wallet.get('balance', 0))
-                        #Logger.info(f"  Wallet type: {wallet_type}, Balance: {wallet_balance}")
+                        #Logger.info(f"  Wallet type: {wallet_type}, Balance: {wallet_balance:.8f}")
                         
                         # Store earn wallet balances separately
-                        if wallet_type == 'earn' or wallet_type == 'bonded' or wallet_type == 'locked':
+                        if wallet_type in ['earn', 'bonded', 'locked']:
                             self.earn_balances[asset_code] = wallet_balance
-                            
-                    total_balance = float(asset_data.get('balance', 0))
+                        
+                        # Add to total balance regardless of wallet type
+                        total_balance += wallet_balance
                 else:
                     # Fallback to legacy format if no wallets field
                     total_balance = float(asset_data.get('balance', 0))
-                    #Logger.info(f"Legacy format for {asset_code} - Balance: {total_balance}")
+                    #Logger.info(f"Legacy format for {asset_code} - Balance: {total_balance:.8f}")
                 
+                # Update total balance
                 self.balances[asset_code] = total_balance
-                #Logger.info(f"Total balance for {asset_code}: {total_balance}")
+                #Logger.info(f"Updated total balance for {asset_code}: {total_balance:.8f}")
                 
                 # Add to tracking set if non-zero balance and not USD
                 if total_balance > 0 and asset_code != 'USD':
@@ -792,7 +795,6 @@ class KrakenWebSocketClient:
                 await self.subscribe_ticker(list(pairs_to_add))
             
             self.active_trading_pairs = new_trading_pairs
-            #Logger.info(f"Active trading pairs after update: {self.active_trading_pairs}")
             
             # Calculate portfolio value after balance update
             await self.calculate_portfolio_value()
@@ -1072,11 +1074,11 @@ class KrakenWebSocketClient:
                             
                     #Logger.info(f"Fetched {len(self.earn_strategies)} earn strategies")
                     #Logger.info("Available earn strategies:")
-                    #for asset, details in self.earn_strategies.items():
-                    #    apr_range = details.get('apr_estimate', {})
-                    #    apr_low = apr_range.get('low', 'N/A')
-                    #    apr_high = apr_range.get('high', 'N/A')
-                    #    Logger.info(f"{asset}: ID={details['id']}, APR={apr_low}-{apr_high}%, Type={details['lock_type']}")
+                    for asset, details in self.earn_strategies.items():
+                        apr_range = details.get('apr_estimate', {})
+                        apr_low = apr_range.get('low', 'N/A')
+                        apr_high = apr_range.get('high', 'N/A')
+                        #Logger.info(f"{asset}: ID={details['id']}, APR={apr_low}-{apr_high}%, Type={details['lock_type']}")
                     
                     return self.earn_strategies
 
@@ -1110,7 +1112,8 @@ class KrakenWebSocketClient:
                 if (order.get('symbol', '').startswith(asset + '/') and 
                     order.get('side') == 'sell' and
                     order.get('order_status') in ['new', 'partially_filled']):
-                    amount_in_orders += float(order.get('order_qty', 0.0))
+                    order_qty = float(order.get('order_qty', 0.0))
+                    amount_in_orders += order_qty
 
             # Get amount in earn wallet
             amount_in_earn = self.earn_balances.get(asset, 0.0)
@@ -1118,12 +1121,22 @@ class KrakenWebSocketClient:
             # Calculate available balance
             available_balance = total_balance - amount_in_orders - amount_in_earn
             
-            #Logger.info(f"\nSpot balance breakdown for {asset}:")
-            #Logger.info(f"  Total balance: {total_balance}")
-            #Logger.info(f"  In sell orders: {amount_in_orders}")
-            #Logger.info(f"  In earn wallet: {amount_in_earn}")
-            #Logger.info(f"  Available: {available_balance}")
+            # Format numbers for consistent decimal places in logging
+            #Logger.info(f"\nBalance Calculation for {asset}:")
+            #Logger.info(f"  Total Balance:     {total_balance:.8f}")
+            #Logger.info(f"  - Sell Orders:     {amount_in_orders:.8f}")
+            #Logger.info(f"  - Earn Balance:    {amount_in_earn:.8f}")
+            #Logger.info(f"  = Available:       {max(0.0, available_balance):.8f}")
             
+            if amount_in_orders > 0:
+                #Logger.info("\n  Sell Orders Detail:")
+                for order in self.orders.values():
+                    if (order.get('symbol', '').startswith(asset + '/') and 
+                        order.get('side') == 'sell' and
+                        order.get('order_status') in ['new', 'partially_filled']):
+                        order_qty = float(order.get('order_qty', 0.0))
+                        #Logger.info(f"    Order {order.get('order_id')}: {order_qty:.8f}")
+
             return max(0.0, available_balance)
 
         except Exception as e:
@@ -1176,10 +1189,10 @@ class KrakenGridBot:
         """Initialize and start the grid trading strategy."""
         # Subscribe to all trading pairs defined in configuration
         trading_pairs = list(TRADING_PAIRS.keys())
-        Logger.info(f"DEBUG: Subscribing to trading pairs: {trading_pairs}")
+        #Logger.info(f"DEBUG: Subscribing to trading pairs: {trading_pairs}")
         await self.client.subscribe_ticker(trading_pairs)
         
-        Logger.info("Starting grid bot monitoring...")
+        #Logger.info("Starting grid bot monitoring...")
     
     """
     Calculates buy price for a trading pair based on grid settings.
@@ -1259,11 +1272,12 @@ class KrakenGridBot:
     """
     async def check_open_orders(self, trading_pair: str):
         """Check if there are any open orders for a trading pair."""
-        #Logger.info(f"\nDEBUG: Checking open orders for {trading_pair}")
-        #Logger.info(f"DEBUG: Current orders in memory: {len(self.client.orders)}")
-        
         # Get the asset code from the trading pair (e.g., 'BTC' from 'BTC/USD')
         asset = trading_pair.split('/')[0]
+        
+        # Skip if this asset isn't in both TRADING_PAIRS and earn strategies
+        if trading_pair not in TRADING_PAIRS or asset not in self.client.earn_strategies:
+            return
         
         # Check and log available spot balance
         available_balance = await self.client.get_available_spot_balance(asset)
@@ -1276,25 +1290,22 @@ class KrakenGridBot:
                 order.get('order_status') in ['new', 'partially_filled'] and
                 order.get('order_id'))
         ]
-        
-        # Debug logging for found orders
-        if open_orders:
-            #Logger.info(f"DEBUG: Found {len(open_orders)} open orders for {trading_pair}:")
-            #for order in open_orders:
-                #Logger.info(f"DEBUG: Order ID: {order.get('order_id')}")
-                #Logger.info(f"DEBUG: Status: {order.get('order_status')}")
-                #Logger.info(f"DEBUG: Side: {order.get('side')}")
-                #Logger.info(f"DEBUG: Price: {order.get('limit_price')}")
 
-            # Check if we have available balance to stake and if asset has an earn strategy
-            if available_balance > 0 and asset in self.client.earn_strategies:
-                strategy = self.client.earn_strategies[asset]
+        if open_orders:
+            strategy = self.client.earn_strategies[asset]
+            
+            # Get minimum allocation from strategy
+            min_allocation = float(strategy['min_allocation'])
+            
+            # Get current price from ticker data
+            ticker = self.client.ticker_data.get(trading_pair)
+            if ticker and ticker.get('last'):
+                current_price = float(ticker['last'])
+                # Calculate USD value of available balance
+                available_balance_usd = available_balance * current_price
                 
-                # Get minimum allocation from strategy
-                min_allocation = float(strategy['min_allocation'])
-                
-                if strategy.get('can_allocate') and available_balance >= min_allocation:
-                    #Logger.info(f"Found stakeable {asset} balance: {available_balance} (min: {min_allocation})")
+                if strategy.get('can_allocate') and available_balance_usd >= min_allocation:
+                    Logger.info(f"Found stakeable {asset} balance: {available_balance:.8f} {asset} (${available_balance_usd:.2f}, min: ${min_allocation:.2f})")
                     
                     # Format amount to match asset precision
                     formatted_amount = f"{available_balance:.8f}".rstrip('0').rstrip('.')
@@ -1329,19 +1340,11 @@ class KrakenGridBot:
                 else:
                     if not strategy.get('can_allocate'):
                         Logger.warning(f"{asset} earn strategy not currently accepting allocations")
-                    elif available_balance < min_allocation:
-                        #Logger.info(f"{asset} available balance ({available_balance}) below minimum allocation ({min_allocation})")
+                    elif available_balance > 0:  # Only log if there's actually a balance
+                        #Logger.info(f"{asset} available balance ({available_balance:.8f} = ${available_balance_usd:.2f}) below minimum allocation (${min_allocation:.2f})")
                         pass
-            else:
-                if available_balance <= 0:
-                    #Logger.info(f"No available balance to stake for {asset}")
-                    pass
-                elif asset not in self.client.earn_strategies:
-                    #Logger.info(f"No earn strategy available for {asset}")
-                    pass
 
         else:
-            #Logger.info(f"No open orders found for {trading_pair}")
             await self.place_orders(trading_pair)
             return None
 
@@ -1355,7 +1358,7 @@ class KrakenGridBot:
             return kept_order
         
         # Return the single buy order
-        return open_orders[0]
+        return open_orders[0] if open_orders else None
 
     """
     Verifies if an open order is within acceptable grid interval.
