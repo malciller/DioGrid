@@ -117,7 +117,7 @@ TRADING_PAIRS = {
   - Example: 0.75% for BTC means orders every $750 at $100,000 BTC price
   - Lower intervals = more frequent trades but smaller profits
   - Higher intervals = larger profits but fewer trades
-  - Should be at least 2x KRAKEN_FEE for profitability
+
 
 - **GRID_SPACING**: Minimum price movement required for new orders
   - Prevents excessive trading in volatile conditions
