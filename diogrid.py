@@ -9,9 +9,6 @@ import aiohttp
 import websockets
 import urllib.parse
 from dotenv import load_dotenv
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 
 # TRADING CONFIGURATION
@@ -187,8 +184,6 @@ class KrakenWebSocketClient:
         self.highest_portfolio_value = STARTING_PORTFOLIO_INVESTMENT
         self.ticker_subscriptions = {}  # Track individual ticker subscriptions
         self.public_message_task = None
-        self.email_manager = EmailManager()
-        # Add new attributes for earn strategies
         self.earn_strategies = {}  # Store strategy details by asset
         self.strategy_ids = {}     # Store strategy IDs by asset
         self.earn_balances = {}  
@@ -663,10 +658,6 @@ class KrakenWebSocketClient:
 
     """
     Monitors portfolio value and executes profit-taking orders when targets are met.
-    Sends email notifications for profit-taking attempts.
-    
-    Raises:
-        Exception: If profit-taking order fails
     """
     async def check_and_take_profit(self):
         """Check if we should take profit and execute USDC order if needed."""
@@ -683,19 +674,6 @@ class KrakenWebSocketClient:
             # Update highest portfolio value
             self.highest_portfolio_value = self.portfolio_value - PROFIT_INCREMENT
 
-            email_body = (
-                f"Attempting to take profit of ${PROFIT_INCREMENT:.2f} USDC\n"
-                f"Amount: ${PROFIT_INCREMENT:.2f} USDC\n"
-                f"Portfolio Value: ${self.portfolio_value:.2f}\n"
-                f"Previous High: ${self.highest_portfolio_value:.2f}"
-            )
-            #TODO: Fix email sending, not currently working from docker environment
-            await self.email_manager.send_email(
-                subject=f"Diophant Grid Bot - Profit Take Attempt {current_time}",
-                body=email_body,
-                notification_type="profit_taking",
-                cooldown_minutes=15
-            )
             # Create market order for USDC
             order_message = {
                 "method": "add_order",
@@ -1148,7 +1126,6 @@ class KrakenGridBot:
     def __init__(self, client: KrakenWebSocketClient):
         self.client = client
         self.active_grids = {}  # Dictionary to track active grid trades per trading pair
-        self.email_manager = EmailManager()
         self.grid_settings = {
             pair: {
                 'buy_order_size': settings['size'],
@@ -1656,65 +1633,6 @@ class KrakenGridBot:
         
         # Return the full buy amount as the sell amount
         return buy_amount
-
-
-class EmailManager:
-    """Handles email notifications for the trading bot."""
-    
-    def __init__(self):
-        self.sender_email = os.getenv("SENDER_EMAIL")
-        self.receiver_email = os.getenv("RECEIVER_EMAIL") 
-        self.app_password = os.getenv("EMAIL_APP_PASSWORD")
-        self.smtp_server = os.getenv("SMTP_SERVER")
-        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        self.last_notification_time = {}  # Track last notification time per type
-        
-    """
-    Sends email notification with cooldown tracking.
-    
-    Args:
-        subject (str): Email subject
-        body (str): Email body
-        notification_type (str, optional): Type of notification for cooldown
-        cooldown_minutes (int): Minutes between notifications of same type
-        
-    Raises:
-        Exception: If email sending fails
-    """
-    async def send_email(self, subject: str, body: str, notification_type: str = None, cooldown_minutes: int = 15):
-        try:
-            # Check cooldown if notification type is specified
-            if notification_type:
-                current_time = time.time()
-                last_time = self.last_notification_time.get(notification_type, 0)
-                
-                # If within cooldown period, skip sending
-                if current_time - last_time < (cooldown_minutes * 60):
-                    #Logger.info(f"Skipping {notification_type} notification - within cooldown period")
-                    return
-                
-                # Update last notification time
-                self.last_notification_time[notification_type] = current_time
-            
-            # Create message
-            message = MIMEMultipart()
-            message["From"] = self.sender_email
-            message["To"] = self.receiver_email
-            message["Subject"] = subject
-            
-            # Add body
-            message.attach(MIMEText(body, "plain"))
-            
-            # Create SMTP session
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.sender_email, self.app_password)
-                server.send_message(message)
-            
-            #Logger.info(f"Email notification sent: {subject}")
-            
-        except Exception as e:
-            Logger.error(f"Failed to send email notification: {str(e)}")
 
 
 """

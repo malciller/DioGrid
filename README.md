@@ -13,7 +13,6 @@ For more details about Kraken's API, visit: https://docs.kraken.com/api/
 - **Order Tracking**: Tracks and logs all open and completed orders.
 - **Kraken API Integration**: Seamlessly integrates with Kraken's Websocket v2 API.
 - **Automated Profit Taking**: Places USDC buy orders when portfolio value increases by configured amount
-- **Email Notifications**: Sends alerts for profit-taking events and important status updates
 - **Dynamic Grid Adjustment**: Automatically adjusts orders to maintain optimal grid spacing
 - **Portfolio Tracking**: Monitors total portfolio value and tracks historical highs
 - **Error Recovery**: Automatically handles connection issues and order placement failures
@@ -46,19 +45,13 @@ pip install -r requirements.txt
 
 ### 3. Set Up Environment Variables
 
-Create a `.env` file in the root directory with your API credentials and email settings:
+Create a `.env` file in the root directory with your API credentials:
 
 ```
 KRAKEN_API_KEY=your_api_key
 KRAKEN_API_SECRET=your_api_secret
-SENDER_EMAIL=your_sender_email@example.com
-RECEIVER_EMAIL=your_receiver_email@example.com
-EMAIL_APP_PASSWORD=your_email_app_password
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
 ```
 
-Note: For Gmail, you'll need to create an App Password. Visit your Google Account settings > Security > 2-Step Verification > App passwords to generate one.
 
 ### 4. Configure Trading Parameters
 
@@ -221,14 +214,6 @@ After setting up your `.env` file:
 
 Now your Docker container should run persistently in the background, ensuring the bot is always running.
 
-
-### Email Notifications (doesn't currently work from docker)
-
-Profit-taking events trigger email notifications including:
-- Profit amount being taken
-- Current portfolio value
-- Previous portfolio high
-- 15-minute cooldown between notifications
 
 ## Automated Staking
 
