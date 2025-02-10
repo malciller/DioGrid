@@ -221,54 +221,7 @@ After setting up your `.env` file:
 Now your Docker container should run persistently in the background, ensuring the bot is always running.
 
 
-### Key Features and Parameters:
-
-- `MIN_PROFIT_USD`: Minimum USD profit target per trade. The bot will sell enough of the purchased asset to secure this profit, while keeping any remaining amount as accumulated holdings. Lower values allow more frequent trading opportunities while building asset positions.
-- `KRAKEN_FEE`: Trading fee percentage applied to each transaction.
-- `STARTING_PORTFOLIO_INVESTMENT`: Initial investment amount for profit taking tracking.
-- `PROFIT_INCREMENT`: USD amount threshold for triggering profit-taking orders.
-- `GRID_INTERVAL`: Percentage spacing between orders for order placement.
-- `GRID_INTERVAL_GRACE`: Additional buffer percentage added to grid spacing to prevent order overlap.
-- `TRADING_PAIRS`: Dictionary of cryptocurrency pairs and their minimum trade amounts (e.g., `{"BTC/USD": 0.0001}`).
-
-
-## Automated USDC Profit Taking
-
-The bot includes an automated USDC profit-taking mechanism that converts gains into stablecoin holdings:
-
-### How It Works
-
-1. **Portfolio High Water Mark**
-   - Bot tracks highest portfolio value (`highest_portfolio_value`)
-   - Initial value set by `STARTING_PORTFOLIO_INVESTMENT` (e.g., $500)
-
-2. **Profit Taking Trigger**
-   - When portfolio value exceeds previous high by `PROFIT_INCREMENT` (e.g., $5)
-   - Places market buy order for USDC equal to the increment amount
-   - Example: At $505, bot buys $5 USDC
-   - New high water mark is set to current value minus increment
-
-3. **Cooldown Period**
-   - 5-minute cooldown between profit-taking events
-   - Prevents excessive trading during volatile periods
-
-### Configuration Parameters
-
-```python
-STARTING_PORTFOLIO_INVESTMENT = 500.0  # Initial portfolio value for tracking
-PROFIT_INCREMENT = 5                   # USD amount to convert to USDC
-```
-
-### Example Scenario
-
-Starting with $500 portfolio:
-1. Portfolio reaches $505
-2. Bot places market order: Buy $5 USDC
-3. New high water mark set to $500
-4. 5-minute cooldown begins
-5. Process repeats when portfolio reaches $505 again
-
-### Email Notifications
+### Email Notifications (doesn't currently work from docker)
 
 Profit-taking events trigger email notifications including:
 - Profit amount being taken
@@ -276,16 +229,9 @@ Profit-taking events trigger email notifications including:
 - Previous portfolio high
 - 15-minute cooldown between notifications
 
-### Tips
-
-- Adjust `PROFIT_INCREMENT` based on your trading volume
-- Smaller increments = more frequent USDC purchases
-- Larger increments = less frequent but bigger purchases
-- Consider exchange fees when setting increment size
-
 ## Automated Staking
 
-DioGrid now includes automatic staking functionality for US customers, following Kraken's reintroduction of staking services:
+DioGrid now includes automatic staking functionality, following Kraken's reintroduction of staking services for US customers:
 
 ### How It Works
 
