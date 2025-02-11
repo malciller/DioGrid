@@ -79,73 +79,10 @@ class Logger:
 
 class KrakenAPIError(Exception):
     """Custom exception class for Kraken API errors"""
-
-    """
-    Initializes a new DioGridError instance.
-    
-    Args:
-        error_code (str): The error code identifier
-        message (str, optional): Custom error message. If not provided, 
-                               a default message is fetched based on the error code.
-    """
     def __init__(self, error_code, message=None):
         self.error_code = error_code
-        self.message = message or self._get_error_description(error_code)
+        self.message = message or error_code
         super().__init__(f"{error_code}: {self.message}")
-
-    def _get_error_description(self, error_code):
-        error_descriptions = {
-            # General Errors
-            'EGeneral:Invalid arguments': 'The request payload is malformed, incorrect or ambiguous',
-            'EGeneral:Invalid arguments:Index unavailable': 'Index pricing is unavailable for stop/profit orders on this pair',
-            'EGeneral:Temporary lockout': 'Too many sequential EAPI:Invalid key errors',
-            'EGeneral:Permission denied': 'API key lacks required permissions',
-            'EGeneral:Internal error': 'Internal error. Please contact support',
-            # Service Errors
-            'EService:Unavailable': 'The matching engine or API is offline',
-            'EService:Market in cancel_only mode': 'Request cannot be made at this time',
-            'EService:Market in post_only mode': 'Request cannot be made at this time',
-            'EService:Deadline elapsed': 'The request timed out according to the default or specified deadline',
-            # API Authentication Errors
-            'EAPI:Invalid key': 'Invalid API key provided',
-            'EAPI:Invalid signature': 'Invalid API signature',
-            'EAPI:Invalid nonce': 'Invalid nonce value',
-            # Order Errors
-            'EOrder:Cannot open opposing position': 'User/tier is ineligible for margin trading',
-            'EOrder:Cannot open position': 'User/tier is ineligible for margin trading',
-            'EOrder:Margin allowance exceeded': 'User has exceeded their margin allowance',
-            'EOrder:Margin level too low': 'Client has insufficient equity or collateral',
-            'EOrder:Margin position size exceeded': 'Client would exceed the maximum position size for this pair',
-            'EOrder:Insufficient margin': 'Exchange does not have available funds for this margin trade',
-            'EOrder:Insufficient funds': 'Client does not have the necessary funds',
-            'EOrder:Order minimum not met': 'Order size does not meet ordermin',
-            'EOrder:Cost minimum not met': 'Cost (price * volume) does not meet costmin',
-            'EOrder:Tick size check failed': 'Price submitted is not a valid multiple of the pair\'s tick_size',
-            'EOrder:Orders limit exceeded': 'Order rate limit exceeded',
-            'EOrder:Rate limit exceeded': 'Rate limit exceeded',
-            'EOrder:Invalid price': 'Invalid price specified',
-            'EOrder:Domain rate limit exceeded': 'Domain-specific rate limit exceeded',
-            'EOrder:Positions limit exceeded': 'Maximum positions limit exceeded',
-            'EOrder:Reduce only:Non-PC': 'Invalid reduce-only order',
-            'EOrder:Reduce only:No position exists': 'Cannot submit reduce-only order when no position exists',
-            'EOrder:Reduce only:Position is closed': 'Reduce-only order would flip position',
-            'EOrder:Scheduled orders limit exceeded': 'Maximum scheduled orders limit exceeded',
-            'EOrder:Unknown position': 'Position not found',
-            # Account Errors
-            'EAccount:Invalid permissions': 'Account has invalid permissions',
-            # Authentication Errors
-            'EAuth:Account temporary disabled': 'Account is temporarily disabled',
-            'EAuth:Account unconfirmed': 'Account is not confirmed',
-            'EAuth:Rate limit exceeded': 'Authentication rate limit exceeded',
-            'EAuth:Too many requests': 'Too many authentication requests',
-            # Trade Errors
-            'ETrade:Invalid request': 'Invalid trade request',
-            # Business/Regulatory Errors
-            'EBM:limit exceeded:CAL': 'Exceeded Canadian Acquisition Limits',
-            # Funding Errors
-            'EFunding:Max fee exceeded': 'Processed fee exceeds max_fee set in Withdraw request'
-        }
-        return error_descriptions.get(error_code, 'Unknown error')
 
 
 class KrakenWebSocketClient:
@@ -1667,9 +1604,6 @@ async def main():
                         # If we have an order, check if it's still valid
                         is_valid = await grid_bot.check_open_orders_open_order_interval(pair, current_order)
                         #Logger.info(f"ORDER: validity for {pair}: {is_valid}")
-                        pass
-                    else:
-                        #Logger.info(f"ORDER: No current orders for {pair}")
                         pass
                     
                 await asyncio.sleep(LONG_SLEEP_TIME)
