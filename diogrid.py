@@ -34,6 +34,7 @@ TRADING_PAIRS = {
         "TRX/USD": (55.0, 2.5, 2.5, 6), # 4-7%      
         "DOT/USD": (2.5, 2.5, 2.5, 4), # 12-18% 
         "KSM/USD": (0.6, 2.5, 2.5, 2), # 16-24%
+        "INJ/USD": (0.81, 2.5, 2.5, 3), # 7-11%
     }.items()
 }
 
@@ -47,8 +48,6 @@ GRID_DECAY_TIME = 5  # 5 second decay time
 
 
 load_dotenv()
-
-
 
 
 class Logger:
@@ -1350,26 +1349,18 @@ class KrakenGridBot:
             return None
         
         try:
-            # Format price based on trading pair
-            if trading_pair == "XRP/USD":
-                formatted_price = f"{new_price:.5f}"  # 5 decimal places for XRP/USD
-            elif trading_pair == "BTC/USD":
-                formatted_price = f"{new_price:.1f}"  # 1 decimal place for BTC/USD
-            else:
-                formatted_price = f"{new_price:.2f}"  # 2 decimal places for others
+            # Format price based on trading pair precision
+            formatted_price = self.format_price_for_pair(trading_pair, new_price)
             
             req_id = int(time.time() * 1000)
             
-            # Create amend order message with all required parameters
+            # Create amend order message with only supported parameters
             amend_message = {
                 "method": "amend_order",
                 "params": {
                     "order_id": order['order_id'],
                     "limit_price": float(formatted_price),
                     "order_qty": float(order.get('order_qty', self.grid_settings[trading_pair]['buy_order_size'])),
-                    "symbol": trading_pair,
-                    "side": order.get('side', 'buy'),  # Include original side
-                    "order_type": order.get('order_type', 'limit'),  # Include original order type
                     "token": await self.client.get_ws_token()
                 },
                 "req_id": req_id
@@ -1377,7 +1368,6 @@ class KrakenGridBot:
             
             # Send amend order and wait for response
             await self.client.websocket.send(json.dumps(amend_message))
-            #Logger.info(f"ORDER: Sent amend request for order {order['order_id']} to price ${formatted_price}")
             
             # Wait for response
             response = await self.client.wait_for_response(req_id)
