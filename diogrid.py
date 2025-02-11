@@ -1304,12 +1304,12 @@ class KrakenGridBot:
             Logger.warning(f"Could not determine limit price for order {open_order['order_id']}")
             return False
 
-        # Calculate grid parameters using asset-specific interval and grace
+        # Calculate grid parameters using asset-specific intervals
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
         trail_interval = self.grid_settings[trading_pair]['trail_interval']
         
-        # Calculate the maximum allowed distance (grid + trail)
-        max_interval = current_market_price * ((grid_interval + trail_interval) / 100) # TESTING: NO TRAIL, GRID INTERVAL LIKE GOOD OL DAYS FOR FASTER ACCUMULATION IN BULL MARKET CONDITIONS
+        # Calculate the maximum allowed distance for order validity check
+        max_interval = current_market_price * ((grid_interval + trail_interval) / 100)
         
         # For buy orders, check if the order is too far from current market price
         if is_buy_order:
@@ -1318,8 +1318,8 @@ class KrakenGridBot:
             # Order is too far below market price (exceeds grid + trail interval)
             if price_difference > max_interval:
                 Logger.warning(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
-                # Set new price at exactly grid + trail interval below current price
-                target_price = current_market_price - max_interval  # This is correct - using full interval for updates
+                # Set new price at exactly grid interval below current price (not max interval)
+                target_price = current_market_price - (current_market_price * grid_interval / 100)
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
             else:
