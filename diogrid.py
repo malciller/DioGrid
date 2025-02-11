@@ -16,25 +16,25 @@ PASSIVE_INCOME = 0 # 0 = accumulation trading, 1 = take profit in USDC
 KRAKEN_FEE = 0.002 # current Kraken maker fee
 STARTING_PORTFOLIO_INVESTMENT = 2700.0 # Starting USD portfolio balance
 PROFIT_INCREMENT = 10 # Profit taking increment in USDC, ignored if PASSIVE_INCOME = 0
-SELL_AMOUNT_MULTIPLIER = 0.999 # Multiplier for sell order size
 TRADING_PAIRS = {
     pair: {
         'size': size,
         'grid_interval': grid,
         'grid_spacing': spacing,
         'trail_interval': spacing,
-        'precision': precision
+        'precision': precision,
+        'sell_multiplier': sell_multiplier  # Added sell multiplier per pair
     }
-    for pair, (size, grid, spacing, precision) in {
-        "BTC/USD": (0.00085, 0.75, 0.75, 1), # $80.00 @ 3.2x (0.00025 @ 1.0x @ $100k)
-        "SOL/USD": (0.06, 1.5, 1.5, 2), # 13-16%      
-        "XRP/USD": (5.0, 2.5, 2.5, 5), # 0%          
-        "ADA/USD": (18.0, 3.5, 3.5, 6), # 2-5% 
-        "ETH/USD": (0.0045, 3.5, 3.5, 2), # 2-7%   
-        "TRX/USD": (55.0, 2.5, 2.5, 6), # 4-7%      
-        "DOT/USD": (2.5, 2.5, 2.5, 4), # 12-18% 
-        "KSM/USD": (0.6, 2.5, 2.5, 2), # 16-24%
-        "INJ/USD": (0.81, 2.5, 2.5, 3), # 7-11%
+    for pair, (size, grid, spacing, precision, sell_multiplier) in {
+        "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), # $80.00 @ 3.2x (0.00025 @ 1.0x @ $100k)
+        "SOL/USD": (0.06, 1.5, 1.5, 2, 0.999), # 13-16%      
+        "XRP/USD": (5.0, 2.5, 2.5, 5, 0.999), # 0%          
+        "ADA/USD": (18.0, 3.5, 3.5, 6, 0.999), # 2-5% 
+        "ETH/USD": (0.0045, 3.5, 3.5, 2, 0.999), # 2-7%   
+        "TRX/USD": (55.0, 2.5, 2.5, 6, 0.999), # 4-7%      
+        "DOT/USD": (2.5, 2.5, 2.5, 4, 0.999), # 12-18% 
+        "KSM/USD": (0.6, 2.5, 2.5, 2, 0.999), # 16-24%
+        "INJ/USD": (0.81, 2.5, 2.5, 3, 0.999), # 7-11%
     }.items()
 }
 
@@ -1422,7 +1422,7 @@ class KrakenGridBot:
         buy_amount = TRADING_PAIRS[trading_pair]['size']
         
         # Calculate optimal sell amount
-        sell_amount = buy_amount * SELL_AMOUNT_MULTIPLIER
+        sell_amount = buy_amount * TRADING_PAIRS[trading_pair]['sell_multiplier']
         
         # Calculate grid prices
         interval_amount = current_price * (grid_interval / 100)

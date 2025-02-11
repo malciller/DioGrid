@@ -61,28 +61,29 @@ Key settings include:
 
 ```python
 # TRADING CONFIGURATION
-PASSIVE_INCOME = 0 # 1 for True, 0 for False
-KRAKEN_FEE = 0.002 # Your Kraken Maker Fee
+PASSIVE_INCOME = 0 # 0 = accumulation trading, 1 = take profit in USDC
+KRAKEN_FEE = 0.002 # current Kraken maker fee
 STARTING_PORTFOLIO_INVESTMENT = 2700.0 # Starting USD portfolio balance
 PROFIT_INCREMENT = 10 # Profit taking increment in USDC, ignored if PASSIVE_INCOME = 0
-SELL_AMOUNT_MULTIPLIER = 0.999 # Multiplier for sell order size
 TRADING_PAIRS = {
     pair: {
-        'size': size, # Buy order size
-        'grid_interval': grid, # Grid interval
-        'grid_spacing': spacing, # Grid spacing
-        'trail_interval': spacing, # Trail interval, secondary buffer for grid spacing to avoid over trading
-        'precision': precision # Asset decimal price precision
+        'size': size,
+        'grid_interval': grid,
+        'grid_spacing': spacing,
+        'trail_interval': spacing,
+        'precision': precision,
+        'sell_multiplier': sell_multiplier  # multiplier of size to allow accumulation of asset, set to 1 for no accumulation
     }
-    for pair, (size, grid, spacing, precision) in {
-        "BTC/USD": (0.00085, 0.75, 0.75, 1), 
-        "SOL/USD": (0.06, 1.5, 1.5, 2),   
-        "XRP/USD": (5.0, 2.5, 2.5, 5),        
-        "ADA/USD": (18.0, 3.5, 3.5, 6), 
-        "ETH/USD": (0.0045, 3.5, 3.5, 2),  
-        "TRX/USD": (55.0, 2.5, 2.5, 6),     
-        "DOT/USD": (2.5, 2.5, 2.5, 4), 
-        "KSM/USD": (0.6, 2.5, 2.5, 2), 
+    for pair, (size, grid, spacing, precision, sell_multiplier) in {
+        "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), 
+        "SOL/USD": (0.06, 1.5, 1.5, 2, 0.999),      
+        "XRP/USD": (5.0, 2.5, 2.5, 5, 0.999),         
+        "ADA/USD": (18.0, 3.5, 3.5, 6, 0.999), 
+        "ETH/USD": (0.0045, 3.5, 3.5, 2, 0.999),  
+        "TRX/USD": (55.0, 2.5, 2.5, 6, 0.999),    
+        "DOT/USD": (2.5, 2.5, 2.5, 4, 0.999), 
+        "KSM/USD": (0.6, 2.5, 2.5, 2, 0.999), 
+        "INJ/USD": (0.81, 2.5, 2.5, 3, 0.999),
     }.items()
 }
 ```
