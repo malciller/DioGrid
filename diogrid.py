@@ -26,15 +26,15 @@ TRADING_PAIRS = {
         'sell_multiplier': sell_multiplier  # Added sell multiplier per pair
     }
     for pair, (size, grid, spacing, precision, sell_multiplier) in {
-        "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), # $80.00 @ 3.2x (0.00025 @ 1.0x @ $100k)
+        "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
         "SOL/USD": (0.06, 1.5, 1.5, 2, 0.999), # 13-16%      
-        "XRP/USD": (5.0, 2.5, 2.5, 5, 0.999), # 0%          
+        "XRP/USD": (5.0, 3.5, 3.5, 5, 0.999), # 0%          
         "ADA/USD": (18.0, 3.5, 3.5, 6, 0.999), # 2-5% 
         "ETH/USD": (0.0045, 3.5, 3.5, 2, 0.999), # 2-7%   
-        "TRX/USD": (55.0, 2.5, 2.5, 6, 0.999), # 4-7%      
-        "DOT/USD": (2.5, 2.5, 2.5, 4, 0.999), # 12-18% 
-        "KSM/USD": (0.6, 2.5, 2.5, 2, 0.999), # 16-24%
-        "INJ/USD": (0.81, 2.5, 2.5, 3, 0.999), # 7-11%
+        "TRX/USD": (55.0, 3.5, 3.5, 6, 0.999), # 4-7%      
+        "DOT/USD": (2.5, 3.5, 3.5, 4, 0.999), # 12-18% 
+        "INJ/USD": (0.81, 3.5, 3.5, 3, 0.999), # 7-11%
+        "KSM/USD": (0.6, 3.5, 3.5, 2, 0.999), # 16-24%
     }.items()
 }
 
@@ -1034,14 +1034,6 @@ class KrakenWebSocketClient:
 
             # Calculate available balance
             available_balance = total_balance - amount_in_orders - amount_in_earn
-            
-            # Format numbers for consistent decimal places in logging
-            #Logger.info(f"\nBalance Calculation for {asset}:")
-            #Logger.info(f"  Total Balance:     {total_balance:.8f}")
-            #Logger.info(f"  - Sell Orders:     {amount_in_orders:.8f}")
-            #Logger.info(f"  - Earn Balance:    {amount_in_earn:.8f}")
-            #Logger.info(f"  = Available:       {max(0.0, available_balance):.8f}")
-            
             if amount_in_orders > 0:
                 #Logger.info("\n  Sell Orders Detail:")
                 for order in self.orders.values():
@@ -1329,7 +1321,7 @@ class KrakenGridBot:
                 return False
             else:
                 # Log that order is within acceptable range
-                Logger.info(f"ORDER: {trading_pair} - Price difference: {percentage_difference:.2f}% (within {max_allowed_difference:.2f}% limit)")
+                Logger.success(f"ORDER: {trading_pair} - OK")
         
         return True
 
@@ -1552,15 +1544,6 @@ class KrakenGridBot:
         sell_revenue = buy_amount * sell_price
         sell_fee = sell_revenue * KRAKEN_FEE
         expected_profit = sell_revenue - sell_fee - total_buy_cost
-        
-        #Logger.info(f"\nCalculated sell parameters for {trading_pair}:")
-        #Logger.info(f"Buy amount: {buy_amount}")
-        #Logger.info(f"Buy price: ${buy_price:.2f}")
-        #Logger.info(f"Sell price: ${sell_price:.2f}")
-        #Logger.info(f"Total buy cost (inc. fee): ${total_buy_cost:.4f}")
-        #Logger.info(f"Expected sell revenue: ${sell_revenue:.4f}")
-        #Logger.info(f"Total fees: ${(buy_fee + sell_fee):.4f}")
-        #Logger.info(f"Expected profit: ${expected_profit:.4f}")
         
         # Return the full buy amount as the sell amount
         return buy_amount
