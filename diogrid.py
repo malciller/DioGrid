@@ -1188,8 +1188,8 @@ class KrakenGridBot:
         # Get the asset code from the trading pair (e.g., 'BTC' from 'BTC/USD')
         asset = trading_pair.split('/')[0]
         
-        # Skip if this asset isn't in both TRADING_PAIRS and earn strategies
-        if trading_pair not in TRADING_PAIRS or asset not in self.client.earn_strategies:
+        # Only check if this is a configured trading pair
+        if trading_pair not in TRADING_PAIRS:
             return
         
         # Check and log available spot balance
@@ -1205,57 +1205,53 @@ class KrakenGridBot:
         ]
 
         if open_orders:
-            strategy = self.client.earn_strategies[asset]
-            
-            # Get minimum allocation from strategy
-            min_allocation = float(strategy['min_allocation'])
-            
-            # Get current price from ticker data
-            ticker = self.client.ticker_data.get(trading_pair)
-            if ticker and ticker.get('last'):
-                current_price = float(ticker['last'])
-                # Calculate USD value of available balance
-                available_balance_usd = available_balance * current_price
+            # Only check earn opportunities if the asset is eligible
+            if asset in self.client.earn_strategies:
+                strategy = self.client.earn_strategies[asset]
                 
-                if strategy.get('can_allocate') and available_balance_usd >= min_allocation:
-                    Logger.info(f"Found stakeable {asset} balance: {available_balance:.8f} {asset} (${available_balance_usd:.2f}, min: ${min_allocation:.2f})")
+                # Get minimum allocation from strategy
+                min_allocation = float(strategy['min_allocation'])
+                
+                # Get current price from ticker data
+                ticker = self.client.ticker_data.get(trading_pair)
+                if ticker and ticker.get('last'):
+                    current_price = float(ticker['last'])
+                    # Calculate USD value of available balance
+                    available_balance_usd = available_balance * current_price
                     
-                    # Format amount to match asset precision
-                    formatted_amount = f"{available_balance:.8f}".rstrip('0').rstrip('.')
-                    
-                    # Prepare allocation request
-                    nonce = str(int(time.time() * 1000))
-                    path = "/0/private/Earn/Allocate"
-                    
-                    post_data = {
-                        "nonce": nonce,
-                        "strategy_id": strategy['id'],
-                        "amount": formatted_amount
-                    }
-                    
-                    url = self.client.rest_url + path
-                    headers = {
-                        "API-Key": self.client.api_key,
-                        "API-Sign": self.client.get_kraken_signature(path, post_data)
-                    }
-                    
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.post(url, headers=headers, data=post_data) as response:
-                                result = await response.json()
-                                
-                                if result.get('error'):
-                                    Logger.error(f"Error allocating {asset} to earn: {result['error']}")
-                                else:
-                                    Logger.success(f"Successfully initiated earn allocation for {formatted_amount} {asset}")
-                    except Exception as e:
-                        Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
-                else:
-                    if not strategy.get('can_allocate'):
-                        Logger.warning(f"{asset} earn strategy not currently accepting allocations")
-                    elif available_balance > 0:  # Only log if there's actually a balance
-                        #Logger.info(f"{asset} available balance ({available_balance:.8f} = ${available_balance_usd:.2f}) below minimum allocation (${min_allocation:.2f})")
-                        pass
+                    if strategy.get('can_allocate') and available_balance_usd >= min_allocation:
+                        Logger.info(f"Found stakeable {asset} balance: {available_balance:.8f} {asset} (${available_balance_usd:.2f}, min: ${min_allocation:.2f})")
+                        
+                        # Format amount to match asset precision
+                        formatted_amount = f"{available_balance:.8f}".rstrip('0').rstrip('.')
+                        
+                        # Prepare allocation request
+                        nonce = str(int(time.time() * 1000))
+                        path = "/0/private/Earn/Allocate"
+                        
+                        post_data = {
+                            "nonce": nonce,
+                            "strategy_id": strategy['id'],
+                            "amount": formatted_amount
+                        }
+                        
+                        url = self.client.rest_url + path
+                        headers = {
+                            "API-Key": self.client.api_key,
+                            "API-Sign": self.client.get_kraken_signature(path, post_data)
+                        }
+                        
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.post(url, headers=headers, data=post_data) as response:
+                                    result = await response.json()
+                                    
+                                    if result.get('error'):
+                                        Logger.error(f"Error allocating {asset} to earn: {result['error']}")
+                                    else:
+                                        Logger.success(f"Successfully initiated earn allocation for {formatted_amount} {asset}")
+                        except Exception as e:
+                            Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
 
         else:
             await self.place_orders(trading_pair)
@@ -1304,28 +1300,36 @@ class KrakenGridBot:
             Logger.warning(f"Could not determine limit price for order {open_order['order_id']}")
             return False
 
-        # Calculate grid parameters using asset-specific intervals
-        grid_interval = self.grid_settings[trading_pair]['grid_interval']
-        trail_interval = self.grid_settings[trading_pair]['trail_interval']
+        # Get grid settings for this pair
+        settings = TRADING_PAIRS[trading_pair]
+        grid_interval = settings['grid_interval']
+        trail_interval = settings['trail_interval']
         
-        # Calculate the maximum allowed distance for order validity check
-        max_interval = current_market_price * ((grid_interval + trail_interval) / 100)
-        
+        # Calculate percentage difference from current price
+        price_difference = current_market_price - order_price
+        percentage_difference = (price_difference / current_market_price) * 100
+
         # For buy orders, check if the order is too far from current market price
         if is_buy_order:
-            price_difference = current_market_price - order_price
+            # Calculate the maximum allowed difference using grid spacing
+            max_allowed_difference = trail_interval + grid_interval
             
-            # Order is too far below market price (exceeds grid + trail interval)
-            if price_difference > max_interval:
-                Logger.warning(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
-                # Set new price at exactly grid interval below current price 
-                target_price = current_market_price - (current_market_price * grid_interval / 100)
+            # Order is too far below market price (exceeds grid spacing)
+            if percentage_difference > max_allowed_difference:
+                Logger.warning(f"ORDER: {trading_pair} - Current: ${current_market_price:.2f}, Order: ${order_price:.2f}")
+                Logger.warning(f"ORDER: Price difference: {percentage_difference:.2f}% (max allowed: {max_allowed_difference:.2f}%)")
+                
+                # Set new price at exactly grid spacing below current price 
+                target_price = current_market_price * (1 - (grid_interval / 100))
+                
+                # Add a small buffer (0.01%) to avoid rounding issues
+                target_price = target_price * 1.0001
+                
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
             else:
                 # Log that order is within acceptable range
-                #Logger.info(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Acceptable")
-                pass
+                Logger.info(f"ORDER: {trading_pair} - Price difference: {percentage_difference:.2f}% (within {max_allowed_difference:.2f}% limit)")
         
         return True
 
