@@ -1318,7 +1318,7 @@ class KrakenGridBot:
             # Order is too far below market price (exceeds grid + trail interval)
             if price_difference > max_interval:
                 Logger.warning(f"ORDER: Market Price: ${current_market_price:.2f}, Max Interval: ${max_interval:.2f}, Price Difference: ${price_difference:.2f}, Unacceptable")
-                # Set new price at exactly grid interval below current price (not max interval)
+                # Set new price at exactly grid interval below current price 
                 target_price = current_market_price - (current_market_price * grid_interval / 100)
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
