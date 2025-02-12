@@ -1,5 +1,6 @@
 # DioGrid
 Follow DioGrid's Performance: https://portfolio.diophantsolutions.com
+
 Read the technical paper: https://portfolio.diophantsolutions.com/diogrid-wp
 
 DioGrid is a Python-based cryptocurrency grid trading bot designed to interact with Kraken's API. 
