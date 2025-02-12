@@ -10,6 +10,7 @@ import websockets
 import traceback
 import urllib.parse
 from dotenv import load_dotenv
+import random
 # TRADING CONFIGURATION
 PASSIVE_INCOME = 0 
 KRAKEN_FEE = 0.002 
@@ -90,10 +91,10 @@ class KrakenWebSocketClient:
             'private': {'last_ping': time.time(), 'last_pong': time.time()},
         }
         self.last_ticker_time = time.time()  
-        self.ping_interval = 30
-        self.pong_timeout = 10  
-        self.reconnect_delay = 5 
-        self.max_reconnect_attempts = 3
+        self.ping_interval = 15
+        self.pong_timeout = 5
+        self.reconnect_delay = 3
+        self.max_reconnect_attempts = 10
         self.execution_rate_limit = None
         self.subscriptions = {}
         self.handlers = {}
@@ -117,6 +118,19 @@ class KrakenWebSocketClient:
         self.subscribed_channels = set()  
         self.subscription_lock = asyncio.Lock()  
         self.subscription_retry_delay = 1  
+        self.ws_timeout = 30
+        self.ws_options = {
+            "ping_interval": None,
+            "ping_timeout": None,
+            "close_timeout": 5,
+            "max_size": 2**23,
+            "max_queue": 2**10
+        }
+        # Rate limiting parameters
+        self.initial_backoff = 1    # Start with 1 second
+        self.max_backoff = 300      # Max 5 minutes
+        self.backoff_factor = 2     # Double the delay each time
+        self.jitter = 0.1           # Add 10% random jitter
     """
     Generates a Kraken API signature for authentication.
     
@@ -147,7 +161,6 @@ class KrakenWebSocketClient:
         path = "/0/private/GetWebSocketsToken"
         url = self.rest_url + path
         nonce = str(int(time.time() * 1000))
-
         post_data = {"nonce": nonce}
         headers = {
             "API-Key": self.api_key,
@@ -177,24 +190,62 @@ class KrakenWebSocketClient:
     Raises:
         Exception: If connection fails
     """
+    async def connect_with_backoff(self):
+        """Connect to WebSocket with exponential backoff."""
+        current_backoff = self.initial_backoff
+        attempt = 0
+        while attempt < self.max_reconnect_attempts:
+            try:
+                token = await self.get_ws_token()
+                if not token:
+                    raise KrakenAPIError('EAPI:Invalid key', 'Failed to obtain WebSocket token')
+                
+                # Establish connections with timeout
+                self.websocket = await asyncio.wait_for(
+                    websockets.connect(self.ws_auth_url, **self.ws_options),
+                    timeout=self.ws_timeout
+                )
+                self.public_websocket = await asyncio.wait_for(
+                    websockets.connect(self.ws_public_url, **self.ws_options),
+                    timeout=self.ws_timeout
+                )
+                # Reset backoff on successful connection
+                return token
+                
+            except websockets.exceptions.InvalidStatus as e:
+                if "HTTP 429" in str(e):
+                    Logger.warning(f"Rate limit hit. Backing off for {current_backoff} seconds...")
+                    # Add random jitter to prevent thundering herd
+                    jitter_amount = random.uniform(-self.jitter, self.jitter)
+                    backoff_with_jitter = current_backoff * (1 + jitter_amount)
+                    await asyncio.sleep(backoff_with_jitter)
+                    # Increase backoff for next attempt
+                    current_backoff = min(current_backoff * self.backoff_factor, self.max_backoff)
+                    attempt += 1
+                    continue
+                else:
+                    raise
+            except Exception as e:
+                Logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
+                await asyncio.sleep(self.reconnect_delay)
+                attempt += 1
+                
+        raise Exception(f"Failed to connect after {self.max_reconnect_attempts} attempts")
+
     async def connect(self):
-        """Connect to Kraken's WebSocket APIs."""
+        """Initial connection with backoff."""
         try:
-            # Get WebSocket token and connect
-            token = await self.get_ws_token()
-            if not token:
-                raise KrakenAPIError('EAPI:Invalid key', 'Failed to obtain WebSocket token')  
-            # Fetch earn strategies before establishing connections
-            await self.get_earn_strategies()
-            self.websocket = await websockets.connect(self.ws_auth_url)
-            self.public_websocket = await websockets.connect(self.ws_public_url)
+            token = await self.connect_with_backoff()
+            
             # Start maintenance tasks
             self.maintenance_task = asyncio.create_task(self.maintain_connection())
             self.message_task = asyncio.create_task(self.handle_messages())
             self.public_message_task = asyncio.create_task(self.handle_public_messages())
+            
             return token
+            
         except Exception as e:
-            Logger.error(f"Error during connection: {str(e)}")
+            Logger.error(f"Initial connection failed: {str(e)}")
             await self.disconnect()
             raise
     """
@@ -252,9 +303,6 @@ class KrakenWebSocketClient:
                     except Exception as e:
                         Logger.warning(f"Failed to send ping: {str(e)}")
                         needs_reconnect = True
-                if time_since_pong > self.ping_interval + self.pong_timeout:
-                    Logger.warning(f"Missing pong response for private connection (last pong was {time_since_pong:.1f}s ago)")
-                    needs_reconnect = True
                 # Check public connection health via ticker data
                 time_since_ticker = current_time - self.last_ticker_time
                 if time_since_ticker > self.ping_interval:
@@ -262,10 +310,24 @@ class KrakenWebSocketClient:
                     # Send a ping to public websocket to check connection
                     try:
                         ping_message = {
-                            "event": "ping",
-                            "reqid": int(current_time * 1000)
+                            "method": "ping",
+                            "req_id": int(current_time * 1000)
                         }
                         await self.public_websocket.send(json.dumps(ping_message))
+                        # Wait for pong response
+                        try:
+                            response = await asyncio.wait_for(
+                                self.public_websocket.recv(),
+                                timeout=self.pong_timeout
+                            )
+                            pong_data = json.loads(response)
+                            if pong_data.get('method') == 'pong':
+                                self.last_ticker_time = current_time  # Reset ticker time on successful pong
+                                Logger.info("Public WebSocket ping successful")
+                                continue
+                        except asyncio.TimeoutError:
+                            Logger.warning("No pong response received from public WebSocket")
+                            needs_reconnect = True
                     except Exception as e:
                         Logger.warning(f"Failed to ping public websocket: {str(e)}")
                         needs_reconnect = True
@@ -317,55 +379,60 @@ class KrakenWebSocketClient:
         Exception: If reconnection fails
     """
     async def reconnect(self):
-        """Reconnect to WebSocket endpoints."""
+        """Reconnect to WebSocket endpoints with backoff."""
         Logger.info("Starting reconnection process...")
-        # Cancel existing tasks
-        tasks = [self.maintenance_task, self.message_task, self.public_message_task]
-        for task in tasks:
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        # Reset task attributes
-        self.maintenance_task = None
-        self.message_task = None
-        self.public_message_task = None
-        # Close existing connections
+        
         try:
-            if self.websocket:
-                await self.websocket.close()
-            if self.public_websocket:
-                await self.public_websocket.close()
-        except Exception as e:
-            Logger.warning(f"Error closing existing connections: {str(e)}")
-        # Wait before reconnecting
-        await asyncio.sleep(self.reconnect_delay)
-        try:
-            # Get new token and establish new connections
-            token = await self.get_ws_token()
-            if not token:
-                raise KrakenAPIError('EAPI:Invalid key', 'Failed to obtain WebSocket token')
-            # Establish new connections
-            self.websocket = await websockets.connect(self.ws_auth_url)
-            self.public_websocket = await websockets.connect(self.ws_public_url)
+            # Cancel existing tasks
+            tasks = [self.maintenance_task, self.message_task, self.public_message_task]
+            for task in tasks:
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+            # Reset task attributes
+            self.maintenance_task = None
+            self.message_task = None
+            self.public_message_task = None
+            
+            # Close existing connections
+            try:
+                if self.websocket:
+                    await self.websocket.close()
+                if self.public_websocket:
+                    await self.public_websocket.close()
+            except Exception as e:
+                Logger.warning(f"Error closing existing connections: {str(e)}")
+
+            # Connect with backoff
+            token = await self.connect_with_backoff()
+            
             # Reset connection status
             self.connection_status['private']['last_ping'] = time.time()
             self.connection_status['private']['last_pong'] = time.time()
+            self.last_ticker_time = time.time()
+            
             # Restart message handling tasks
             self.message_task = asyncio.create_task(self.handle_messages())
             self.public_message_task = asyncio.create_task(self.handle_public_messages())
             self.maintenance_task = asyncio.create_task(self.maintain_connection())
+            
             # Resubscribe to channels
             await self.subscribe(['balances', 'executions'], token)
+            
             # Resubscribe to active trading pairs
             if self.active_trading_pairs:
                 await self.subscribe_ticker(list(self.active_trading_pairs))
+
             Logger.success("Successfully reconnected to WebSocket")
             return True
+
         except Exception as e:
-            Logger.error(f"Error during reconnection: {str(e)}")
+            Logger.error(f"Reconnection failed: {str(e)}")
+            self.running = False
             raise
     """
     Processes incoming messages from the private WebSocket connection.
@@ -377,18 +444,27 @@ class KrakenWebSocketClient:
     """
     async def handle_messages(self):
         """Handle incoming messages from the WebSocket."""
-        try:
-            while self.running:
-                message = await self.websocket.recv()
+        while self.running:
+            try:
+                # Add timeout to receive operation
+                message = await asyncio.wait_for(
+                    self.websocket.recv(),
+                    timeout=self.ws_timeout
+                )
                 await self.handle_message(message)
-        except asyncio.CancelledError:
-            pass
-        except websockets.exceptions.ConnectionClosed:
-            Logger.warning("WebSocket connection closed")
-            self.running = False
-        except Exception as e:
-            Logger.error("Error in message handling", e)
-            self.running = False
+            except asyncio.TimeoutError:
+                Logger.warning("Message receive timeout, checking connection...")
+                if not self.websocket.open:
+                    Logger.warning("WebSocket connection lost")
+                    await self.reconnect()
+                    break
+            except websockets.exceptions.ConnectionClosed:
+                Logger.warning("Private WebSocket connection closed")
+                await self.reconnect()
+                break
+            except Exception as e:
+                Logger.error(f"Error in message handling: {str(e)}")
+                await asyncio.sleep(LONG_SLEEP_TIME)
     """
     Processes incoming messages from the public WebSocket connection.
     Handles ticker updates and heartbeat messages.
@@ -399,30 +475,45 @@ class KrakenWebSocketClient:
     """
     async def handle_public_messages(self):
         """Handle messages from public WebSocket."""
-        try:
-            while self.running:
-                message = await self.public_websocket.recv()
+        while self.running:
+            try:
+                # Add timeout to receive operation
+                message = await asyncio.wait_for(
+                    self.public_websocket.recv(),
+                    timeout=self.ws_timeout
+                )
                 data = json.loads(message)
-                if isinstance(data, dict) and data.get('event') == 'error':
-                    Logger.error(f"WebSocket error: {data.get('error')}")
-                    continue
-                # Handle other message types
-                if data.get('channel') == 'heartbeat':
-                    continue
-                if data.get('channel') == 'status':
-                    continue
-                if isinstance(data, dict) and data.get('method') in ['subscribe', 'unsubscribe']:
-                    if not data.get('success') and data.get('error'):
-                        Logger.error(f"WebSocket subscription error: {data.get('error')}")
-                    continue
+                
+                # Update last ticker time for any valid message
+                self.last_ticker_time = time.time()
+                
+                if isinstance(data, dict):
+                    if data.get('event') == 'error':
+                        Logger.error(f"WebSocket error: {data.get('error')}")
+                        continue
+                    elif data.get('method') == 'pong':
+                        continue
+                    elif data.get('method') in ['subscribe', 'unsubscribe']:
+                        if not data.get('success') and data.get('error'):
+                            Logger.error(f"WebSocket subscription error: {data.get('error')}")
+                        continue
+                
                 if data.get('channel') == 'ticker':
                     await self.handle_ticker(data)
-        except asyncio.CancelledError:
-            pass
-        except websockets.exceptions.ConnectionClosed:
-            Logger.warning("Public WebSocket connection closed")
-        except Exception as e:
-            Logger.error("Error in public message handling", e)
+                    
+            except asyncio.TimeoutError:
+                Logger.warning("Public message receive timeout, checking connection...")
+                if not self.public_websocket.open:
+                    Logger.warning("Public WebSocket connection lost")
+                    await self.reconnect()
+                    break
+            except websockets.exceptions.ConnectionClosed:
+                Logger.warning("Public WebSocket connection closed")
+                await self.reconnect()
+                break
+            except Exception as e:
+                Logger.error(f"Error in public message handling: {str(e)}")
+                await asyncio.sleep(LONG_SLEEP_TIME)
     """
     Processes a single WebSocket message.
     Handles response matching, pong messages, and channel-specific data.
