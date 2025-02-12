@@ -13,10 +13,10 @@ from dotenv import load_dotenv
 
 
 # TRADING CONFIGURATION
-PASSIVE_INCOME = 0 # 0 = accumulation trading, 1 = take profit in USDC
-KRAKEN_FEE = 0.002 # current Kraken maker fee
-STARTING_PORTFOLIO_INVESTMENT = 2700.0 # Starting USD portfolio balance
-PROFIT_INCREMENT = 10 # Profit taking increment in USDC, ignored if PASSIVE_INCOME = 0
+PASSIVE_INCOME = 0 
+KRAKEN_FEE = 0.002 
+STARTING_PORTFOLIO_INVESTMENT = 2700.0 
+PROFIT_INCREMENT = 10 
 TRADING_PAIRS = {
     pair: {
         'size': size,
@@ -24,7 +24,7 @@ TRADING_PAIRS = {
         'grid_spacing': spacing,
         'trail_interval': spacing,
         'precision': precision,
-        'sell_multiplier': sell_multiplier  # Added sell multiplier per pair
+        'sell_multiplier': sell_multiplier 
     }
     for pair, (size, grid, spacing, precision, sell_multiplier) in {
         "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
@@ -80,20 +80,19 @@ class KrakenWebSocketClient:
     def __init__(self):
         self.api_key = os.getenv('KRAKEN_API_KEY')
         self.api_secret = os.getenv('KRAKEN_API_SECRET')
-        self.ws_auth_url = "wss://ws-auth.kraken.com/v2"  # For private data
-        self.ws_public_url = "wss://ws.kraken.com/v2"     # For public data
+        self.ws_auth_url = "wss://ws-auth.kraken.com/v2"  
+        self.ws_public_url = "wss://ws.kraken.com/v2"    
         self.rest_url = "https://api.kraken.com"
         self.websocket = None
-        self.public_websocket = None  # Add new websocket connection
+        self.public_websocket = None  
         self.running = True
-        # Only track private connection status
         self.connection_status = {
             'private': {'last_ping': time.time(), 'last_pong': time.time()},
         }
-        self.last_ticker_time = time.time()  # Track last ticker message
+        self.last_ticker_time = time.time()  
         self.ping_interval = 30
-        self.pong_timeout = 10  # Time to wait for pong response
-        self.reconnect_delay = 5  # Seconds to wait before reconnecting
+        self.pong_timeout = 10  
+        self.reconnect_delay = 5 
         self.max_reconnect_attempts = 3
         self.execution_rate_limit = None
         self.subscriptions = {}
@@ -103,21 +102,21 @@ class KrakenWebSocketClient:
         self.maintenance_task = None
         self.message_task = None
         self.ticker_data = {}
-        self.active_trading_pairs = set()  # Track active trading pairs
+        self.active_trading_pairs = set()  
         self.portfolio_value = 0.0
         self.last_portfolio_update = 0
-        self.update_interval = 5  # Update portfolio value every 5 seconds
+        self.update_interval = 5  
         self.last_profit_take_time = 0
-        self.profit_take_cooldown = 300  # 5 minutes in seconds
+        self.profit_take_cooldown = 300  
         self.highest_portfolio_value = STARTING_PORTFOLIO_INVESTMENT
-        self.ticker_subscriptions = {}  # Track individual ticker subscriptions
+        self.ticker_subscriptions = {}  
         self.public_message_task = None
-        self.earn_strategies = {}  # Store strategy details by asset
-        self.strategy_ids = {}     # Store strategy IDs by asset
+        self.earn_strategies = {}  
+        self.strategy_ids = {}    
         self.earn_balances = {}  
-        self.subscribed_channels = set()  # Track which channels are already subscribed
-        self.subscription_lock = asyncio.Lock()  # Add lock for thread-safe subscription management
-        self.subscription_retry_delay = 1  # Delay between subscription attempts
+        self.subscribed_channels = set()  
+        self.subscription_lock = asyncio.Lock()  
+        self.subscription_retry_delay = 1  
 
     """
     Generates a Kraken API signature for authentication.
