@@ -514,7 +514,7 @@ class KrakenWebSocketClient:
                     total_value += value
         self.portfolio_value = total_value
         current_time = time.strftime('%H:%M:%S')
-        Logger.info(f"Portfolio Value: ${total_value:,.2f} ({current_time})")
+        Logger.success(f"Portfolio Value: ${total_value:,.2f} ({current_time})")
         # Check if we should take profit
         if PASSIVE_INCOME == 1:
             await self.check_and_take_profit()
