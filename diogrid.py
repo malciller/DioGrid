@@ -7,6 +7,7 @@ import hashlib
 import asyncio
 import aiohttp
 import websockets
+import traceback
 import urllib.parse
 from dotenv import load_dotenv
 
@@ -38,24 +39,16 @@ TRADING_PAIRS = {
     }.items()
 }
 
-
-
-# SLEEP TIMES
 SHORT_SLEEP_TIME = 0.1
 LONG_SLEEP_TIME = 3
-GRID_DECAY_TIME = 5  # 5 second decay time
-
-
-
+GRID_DECAY_TIME = 5 
 load_dotenv()
-
-
 class Logger:
-    ERROR = '\033[91m'    # Red
-    WARNING = '\033[93m'  # Yellow
-    INFO = '\033[94m'     # Blue
-    SUCCESS = '\033[92m'  # Green
-    RESET = '\033[0m'     # Reset color
+    ERROR = '\033[91m'    
+    WARNING = '\033[93m' 
+    INFO = '\033[94m'     
+    SUCCESS = '\033[92m' 
+    RESET = '\033[0m'    
 
     @staticmethod
     def error(msg: str, exc_info: Exception = None):
@@ -82,7 +75,6 @@ class KrakenAPIError(Exception):
         self.error_code = error_code
         self.message = message or error_code
         super().__init__(f"{error_code}: {self.message}")
-
 
 class KrakenWebSocketClient:
     def __init__(self):
@@ -436,7 +428,7 @@ class KrakenWebSocketClient:
             if isinstance(data, dict) and data.get('method') in ['subscribe', 'unsubscribe']:
                 if data.get('success') is False:
                     error_msg = data.get('error', 'Unknown error')
-                    if 'Already subscribed' not in error_msg:  # Only log non-duplicate subscription errors
+                    if 'Already subscribed' not in error_msg:  
                         Logger.error(f"WebSocket subscription error: {error_msg}")
                 return
             
@@ -452,7 +444,6 @@ class KrakenWebSocketClient:
                 return
             
             if isinstance(data, dict) and data.get('method') == 'edit_order':
-                #Logger.info(f"Order edit response: {data}")
                 return
             
             if 'channel' in data:
@@ -482,7 +473,6 @@ class KrakenWebSocketClient:
         async with self.subscription_lock:
             for channel in channels:
                 if channel in self.subscribed_channels:
-                    #Logger.info(f"Already subscribed to {channel}, skipping...")
                     continue
 
                 subscribe_message = {
@@ -504,7 +494,7 @@ class KrakenWebSocketClient:
                 try:
                     await self.websocket.send(json.dumps(subscribe_message))
                     self.subscribed_channels.add(channel)
-                    await asyncio.sleep(self.subscription_retry_delay)  # Add delay between subscriptions
+                    await asyncio.sleep(self.subscription_retry_delay) 
                 except Exception as e:
                     Logger.error(f"Error subscribing to {channel}: {str(e)}")
 
@@ -616,7 +606,7 @@ class KrakenWebSocketClient:
                 "params": {
                     "order_type": "market",
                     "side": "buy",
-                    "cash_order_qty": PROFIT_INCREMENT,  # Buy $5 worth of USDC
+                    "cash_order_qty": PROFIT_INCREMENT, 
                     "symbol": "USDC/USD",
                     "token": await self.get_ws_token()
                 },
@@ -646,10 +636,6 @@ class KrakenWebSocketClient:
             # Keep track of all assets with non-zero balances
             assets_with_balance = set()
             
-            # Process all balances in the update
-            #Logger.info(f"Balance update received - Type: {data.get('type')}")
-            #Logger.info(f"Raw balance data: {json.dumps(data, indent=2)}")
-            
             for asset_data in data.get('data', []):
                 asset_code = asset_data.get('asset')
                 
@@ -662,11 +648,9 @@ class KrakenWebSocketClient:
                 
                 if wallets:
                     # If we have wallet data, process each wallet
-                    #Logger.info(f"Processing wallets for {asset_code}:")
                     for wallet in wallets:
                         wallet_type = wallet.get('type')
                         wallet_balance = float(wallet.get('balance', 0))
-                        #Logger.info(f"  Wallet type: {wallet_type}, Balance: {wallet_balance:.8f}")
                         
                         # Store earn wallet balances separately
                         if wallet_type in ['earn', 'bonded', 'locked']:
@@ -677,11 +661,9 @@ class KrakenWebSocketClient:
                 else:
                     # Fallback to legacy format if no wallets field
                     total_balance = float(asset_data.get('balance', 0))
-                    #Logger.info(f"Legacy format for {asset_code} - Balance: {total_balance:.8f}")
                 
                 # Update total balance
                 self.balances[asset_code] = total_balance
-                #Logger.info(f"Updated total balance for {asset_code}: {total_balance:.8f}")
                 
                 # Add to tracking set if non-zero balance and not USD
                 if total_balance > 0 and asset_code != 'USD':
@@ -692,8 +674,6 @@ class KrakenWebSocketClient:
             for asset_code, balance in self.balances.items():
                 if balance > 0 and asset_code != 'USD':
                     assets_with_balance.add(asset_code)
-            
-            #Logger.info(f"Assets with non-zero balances: {assets_with_balance}")
             
             # Convert assets to trading pairs
             new_trading_pairs = {f"{asset}/USD" for asset in assets_with_balance}
@@ -730,7 +710,6 @@ class KrakenWebSocketClient:
         async with self.subscription_lock:
             for symbol in symbols:
                 if symbol in self.ticker_subscriptions:
-                    #Logger.info(f"Already subscribed to ticker for {symbol}, skipping...")
                     continue
 
                 subscribe_message = {
@@ -743,7 +722,7 @@ class KrakenWebSocketClient:
                 try:
                     await self.public_websocket.send(json.dumps(subscribe_message))
                     self.ticker_subscriptions[symbol] = True
-                    await asyncio.sleep(self.subscription_retry_delay)  # Add delay between subscriptions
+                    await asyncio.sleep(self.subscription_retry_delay) 
                 except Exception as e:
                     Logger.error(f"Error subscribing to ticker for {symbol}: {str(e)}")
 
@@ -773,7 +752,6 @@ class KrakenWebSocketClient:
             await self.public_websocket.send(json.dumps(unsubscribe_message))
             for symbol in symbols:
                 self.ticker_subscriptions.pop(symbol, None)
-                #Logger.info(f"Unsubscribed from ticker for: {symbol}")
             await asyncio.sleep(SHORT_SLEEP_TIME)
         except websockets.exceptions.ConnectionClosed:
             Logger.warning("Public connection closed while unsubscribing from tickers")
@@ -792,7 +770,7 @@ class KrakenWebSocketClient:
     async def handle_ticker(self, data):
         """Handle incoming ticker updates."""
         if data.get('channel') == 'ticker':
-            self.last_ticker_time = time.time()  # Update ticker timestamp
+            self.last_ticker_time = time.time() 
             update_portfolio = False
             current_time = time.time()
             
@@ -805,7 +783,6 @@ class KrakenWebSocketClient:
                     'volume': ticker_data.get('volume'),
                     'vwap': ticker_data.get('vwap')
                 }
-                #print(f"TICKER: {symbol} Last={ticker_data.get('last')} Bid={ticker_data.get('bid')} Ask={ticker_data.get('ask')}")
                 update_portfolio = True
             
             # Update portfolio value if enough time has passed
@@ -846,7 +823,6 @@ class KrakenWebSocketClient:
                 if exec_type in ['filled', 'canceled', 'expired']:
                     if order_id in self.orders:
                         removed_order = self.orders.pop(order_id)
-                        #Logger.info(f"Order {order_id} for {removed_order.get('symbol')} {exec_type}")
                 elif exec_type in ['new', 'pending_new']:
                     if order_id in self.orders:
                         self.orders[order_id].update(execution)
@@ -985,14 +961,6 @@ class KrakenWebSocketClient:
                                 'user_cap': strategy.get('user_cap')
                             }
                             self.strategy_ids[asset] = strategy.get('id')
-                            
-                    #Logger.info(f"Fetched {len(self.earn_strategies)} earn strategies")
-                    #Logger.info("Available earn strategies:")
-                    for asset, details in self.earn_strategies.items():
-                        apr_range = details.get('apr_estimate', {})
-                        apr_low = apr_range.get('low', 'N/A')
-                        apr_high = apr_range.get('high', 'N/A')
-                        #Logger.info(f"{asset}: ID={details['id']}, APR={apr_low}-{apr_high}%, Type={details['lock_type']}")
                     
                     return self.earn_strategies
 
@@ -1041,7 +1009,6 @@ class KrakenWebSocketClient:
                         order.get('side') == 'sell' and
                         order.get('order_status') in ['new', 'partially_filled']):
                         order_qty = float(order.get('order_qty', 0.0))
-                        #Logger.info(f"    Order {order.get('order_id')}: {order_qty:.8f}")
 
             return max(0.0, available_balance)
 
@@ -1053,15 +1020,15 @@ class KrakenWebSocketClient:
 class KrakenGridBot:
     def __init__(self, client: KrakenWebSocketClient):
         self.client = client
-        self.active_grids = {}  # Dictionary to track active grid trades per trading pair
+        self.active_grids = {} 
         self.grid_settings = {
             pair: {
                 'buy_order_size': settings['size'],
                 'sell_order_size': settings['size'],
                 'grid_interval': settings['grid_interval'],
                 'trail_interval': settings['trail_interval'],
-                'active_orders': set(),  # Track order IDs for this grid
-                'last_order_time': 0  # Add tracking for last order time
+                'active_orders': set(),
+                'last_order_time': 0 
             }
             for pair, settings in TRADING_PAIRS.items()
         }
@@ -1078,7 +1045,6 @@ class KrakenGridBot:
         # Format the price with the specified precision
         formatted_price = float(f"{price:.{precision}f}")
         
-        #Logger.info(f"Formatted {trading_pair} price from {price} to {formatted_price} with {precision} decimals")
         return formatted_price
 
     """
@@ -1094,10 +1060,7 @@ class KrakenGridBot:
         """Initialize and start the grid trading strategy."""
         # Subscribe to all trading pairs defined in configuration
         trading_pairs = list(TRADING_PAIRS.keys())
-        #Logger.info(f"DEBUG: Subscribing to trading pairs: {trading_pairs}")
         await self.client.subscribe_ticker(trading_pairs)
-        
-        #Logger.info("Starting grid bot monitoring...")
     
     """
     Calculates buy price for a trading pair based on grid settings.
@@ -1125,7 +1088,6 @@ class KrakenGridBot:
         # Calculate buy price (current price minus interval)
         buy_price = current_price - interval_amount
         
-        #Logger.info(f"Grid price for {trading_pair}: Current=${current_price:.2f}, Buy=${buy_price:.2f}, Interval=${interval_amount:.2f}")
         return buy_price
 
     """
@@ -1142,7 +1104,7 @@ class KrakenGridBot:
         cancel_message = {
             "method": "cancel_order",
             "params": {
-                "order_id": [order_id],  # API expects an array of order IDs
+                "order_id": [order_id],  
                 "token": await self.client.get_ws_token()
             },
             "req_id": int(time.time() * 1000)
@@ -1150,7 +1112,6 @@ class KrakenGridBot:
         
         try:
             await self.client.websocket.send(json.dumps(cancel_message))
-            #Logger.info(f"Sent cancel request for order {order_id}")
             
             # Wait briefly for the cancel to process
             await asyncio.sleep(LONG_SLEEP_TIME)
@@ -1399,10 +1360,8 @@ class KrakenGridBot:
         
         if current_time - last_order_time < GRID_DECAY_TIME:
             time_left = GRID_DECAY_TIME - (current_time - last_order_time)
-            #Logger.info(f"Decay timer active for {trading_pair}. {time_left:.1f}s remaining")
             return
             
-        #Logger.info(f"Executing trade strategy for {trading_pair}")
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
             Logger.error(f"No ticker data available for {trading_pair}")
@@ -1447,8 +1406,6 @@ class KrakenGridBot:
                 "req_id": buy_req_id
             }
             
-            #Logger.info(f"Placing buy order for {trading_pair} - Price: ${buy_price:.2f}, Quantity: {buy_amount}")
-            
             try:
                 await self.client.websocket.send(json.dumps(buy_order_msg))
                 buy_response = await self.client.wait_for_response(buy_req_id)
@@ -1487,8 +1444,6 @@ class KrakenGridBot:
                         "req_id": sell_req_id
                     }
                     
-                    #Logger.info(f"Placing sell order for {trading_pair} - Price: ${sell_price:.2f}, Quantity: {sell_amount}")
-                    
                     await self.client.websocket.send(json.dumps(sell_order_msg))
                     sell_response = await self.client.wait_for_response(sell_req_id)
                     
@@ -1500,7 +1455,6 @@ class KrakenGridBot:
                         else:
                             Logger.warning(f"Sell order placed but no ID received for {trading_pair}")
                     else:
-                        #Logger.info(f"Could not place sell order for {trading_pair} (likely insufficient funds)")
                         pass
                         
                 except Exception as sell_error:
@@ -1559,7 +1513,7 @@ Raises:
 async def main():
     """Main function to establish WebSocket connection and manage subscriptions."""
     client = KrakenWebSocketClient()
-    grid_bot = KrakenGridBot(client)  # Create a single instance of KrakenGridBot
+    grid_bot = KrakenGridBot(client)
 
     try:
         # Connect and set up WebSocket handlers
@@ -1580,7 +1534,6 @@ async def main():
                     if current_order:
                         # If we have an order, check if it's still valid
                         is_valid = await grid_bot.check_open_orders_open_order_interval(pair, current_order)
-                        #Logger.info(f"ORDER: validity for {pair}: {is_valid}")
                         pass
                     
                 await asyncio.sleep(LONG_SLEEP_TIME)
@@ -1591,7 +1544,6 @@ async def main():
     except Exception as e:
         Logger.error(f"Unexpected error: {str(e)}")
     finally:
-        #Logger.info("\nGracefully shutting down...")
         try:
             # First unsubscribe from all channels if connection is still open
             if client.websocket:
@@ -1604,9 +1556,6 @@ async def main():
             await client.disconnect()
             Logger.success("Successfully disconnected from all Kraken WebSocket streams.")
         except Exception as e:
-            Logger.error(f"Error during shutdown: {str(e)}")
-            # Optionally, add more detailed error information for debugging
-            import traceback
             Logger.error(f"Shutdown error details:\n{traceback.format_exc()}")
 
 
