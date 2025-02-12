@@ -24,7 +24,7 @@ TRADING_PAIRS = {
         'sell_multiplier': sell_multiplier 
     }
     for pair, (size, grid, trail, precision, sell_multiplier) in {
-        "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
+        "BTC/USD": (0.000875, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
         "SOL/USD": (0.06, 1.5, 1.5, 2, 0.999), # 13-16%      
         "XRP/USD": (5.0, 3.5, 3.5, 5, 0.999), # 0%          
         "ADA/USD": (18.0, 3.5, 3.5, 6, 0.999), # 2-5% 
@@ -37,7 +37,10 @@ TRADING_PAIRS = {
 }
 SHORT_SLEEP_TIME = 0.1
 LONG_SLEEP_TIME = 3
-GRID_DECAY_TIME = 5 
+GRID_DECAY_TIME = 5
+MAX_AMEND_RETRIES = 3
+AMEND_RETRY_DELAY = 5 
+AMEND_RESPONSE_TIMEOUT = 10  
 load_dotenv()
 
 class Logger:
@@ -1105,37 +1108,40 @@ class KrakenGridBot:
         if not order or not order.get('order_id'):
             Logger.warning("No valid order provided to update")
             return None
-        try:
-            # Format price based on trading pair precision
-            formatted_price = self.format_price_for_pair(trading_pair, new_price)
-            req_id = int(time.time() * 1000)
-            # Create amend order message with only supported parameters
-            amend_message = {
-                "method": "amend_order",
-                "params": {
-                    "order_id": order['order_id'],
-                    "limit_price": float(formatted_price),
-                    "order_qty": float(order.get('order_qty', self.grid_settings[trading_pair]['buy_order_size'])),
-                    "token": await self.client.get_ws_token()
-                },
-                "req_id": req_id
-            }
-            # Send amend order and wait for response
-            await self.client.websocket.send(json.dumps(amend_message))
-            # Wait for response
-            response = await self.client.wait_for_response(req_id)
-            if response and response.get('success') is True:
-                Logger.success(f"ORDER: Successfully updated order price to ${formatted_price}")
-                return True
-            else:
-                Logger.warning(f"Failed to update order price: {response}")
-                # If amend fails, cancel the order and place a new one
-                await self.cancel_order(order['order_id'])
-                await self.place_orders(trading_pair)
-                return False
-        except Exception as e:
-            Logger.error(f"Error updating order price: {str(e)}")
-            return False
+        for attempt in range(MAX_AMEND_RETRIES):
+            try:
+                # Format price based on trading pair precision
+                formatted_price = self.format_price_for_pair(trading_pair, new_price)
+                req_id = int(time.time() * 1000)
+                amend_message = {
+                    "method": "amend_order",
+                    "params": {
+                        "order_id": order['order_id'],
+                        "limit_price": float(formatted_price),
+                        "order_qty": float(order.get('order_qty', self.grid_settings[trading_pair]['buy_order_size'])),
+                        "token": await self.client.get_ws_token()
+                    },
+                    "req_id": req_id
+                }
+                await self.client.websocket.send(json.dumps(amend_message))
+                response = await self.client.wait_for_response(req_id, timeout=AMEND_RESPONSE_TIMEOUT)
+                if response and response.get('success') is True:
+                    Logger.success(f"ORDER: Successfully updated order price to ${formatted_price}")
+                    return True
+                else:
+                    if attempt < MAX_AMEND_RETRIES - 1:
+                        Logger.warning(f"Amend attempt {attempt + 1} failed: {response}. Retrying in {AMEND_RETRY_DELAY} seconds...")
+                        await asyncio.sleep(AMEND_RETRY_DELAY)
+                    continue
+            except Exception as e:
+                if attempt < MAX_AMEND_RETRIES - 1:
+                    Logger.warning(f"Error on amend attempt {attempt + 1}: {str(e)}. Retrying in {AMEND_RETRY_DELAY} seconds...")
+                    await asyncio.sleep(AMEND_RETRY_DELAY)
+                continue
+        Logger.error(f"All {MAX_AMEND_RETRIES} amend attempts failed. Falling back to cancel/replace")
+        await self.cancel_order(order['order_id'])
+        await self.place_orders(trading_pair)
+        return False
     """
     Places new grid orders for a trading pair.
     
