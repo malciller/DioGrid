@@ -11,7 +11,6 @@ import traceback
 import urllib.parse
 from dotenv import load_dotenv
 
-
 # TRADING CONFIGURATION
 PASSIVE_INCOME = 0 
 KRAKEN_FEE = 0.002 
@@ -831,60 +830,6 @@ class KrakenWebSocketClient:
                 elif order_id in self.orders:
                     self.orders[order_id].update(execution)
 
-    """
-    Formats and prints execution details for logging purposes.
-    
-    Args:
-        execution (dict): Execution data to print
-    """
-    def print_execution(self, execution):
-        """Print execution details."""
-        exec_type = execution.get('exec_type')
-        if exec_type in ['trade', 'filled']:
-            print(f"ORDER: Trade {execution.get('symbol')} {execution.get('side')} {execution.get('last_qty')}@{execution.get('last_price')} ID={execution.get('order_id')} Status={execution.get('order_status')}")
-        else:
-            # Filter out fields that are N/A
-            details = {
-                'symbol': execution.get('symbol'),
-                'side': execution.get('side'),
-                'qty': execution.get('order_qty'),
-                'price': execution.get('limit_price'),
-                'status': execution.get('order_status'),
-                'id': execution.get('order_id')
-            }
-            # Remove None or N/A values
-            details = {k: v for k, v in details.items() if v not in [None, 'N/A']}
-            details_str = ' '.join(f"{k}={v}" for k, v in details.items())
-            #print(f"ORDER: {details_str}")
-
-    """
-    Processes execution messages for order updates.
-    Maintains order state and handles various execution types.
-    
-    Args:
-        message (dict): Execution message from WebSocket
-    """
-    async def handle_execution_message(self, message):
-        """Handle execution messages for order updates."""
-        if message['type'] == 'snapshot':
-            self.orders = {}
-            for execution in message['data']:
-                if execution['order_status'] not in ['filled', 'canceled', 'expired']:
-                    self.orders[execution['order_id']] = execution
-        
-        elif message['type'] == 'update':
-            for execution in message['data']:
-                order_id = execution['order_id']
-                
-                if execution['exec_type'] in ['filled', 'canceled', 'expired']:
-                    # Remove completed orders
-                    self.orders.pop(order_id, None)
-                else:
-                    # Update or add order
-                    if order_id in self.orders:
-                        self.orders[order_id].update(execution)
-                    else:
-                        self.orders[order_id] = execution
 
     """
     Waits for a response to a specific request with timeout.
@@ -1061,33 +1006,6 @@ class KrakenGridBot:
         trading_pairs = list(TRADING_PAIRS.keys())
         await self.client.subscribe_ticker(trading_pairs)
     
-    """
-    Calculates buy price for a trading pair based on grid settings.
-    
-    Args:
-        trading_pair (str): Trading pair symbol
-        
-    Returns:
-        float: Calculated buy price
-        None: If price data unavailable
-    """
-    async def get_buy_price(self, trading_pair: str) -> float:
-        # Get current ticker data for the trading pair
-        ticker = self.client.ticker_data.get(trading_pair)
-        if not ticker or 'last' not in ticker:
-            Logger.warning(f"No ticker data available for {trading_pair}")
-            return None
-            
-        # Get current price from last trade
-        current_price = float(ticker['last'])
-        
-        # Calculate grid interval in absolute terms
-        interval_amount = current_price * (self.grid_settings[trading_pair]['grid_interval']/ 100)
-        
-        # Calculate buy price (current price minus interval)
-        buy_price = current_price - interval_amount
-        
-        return buy_price
 
     """
     Cancels an existing order.
@@ -1467,40 +1385,6 @@ class KrakenGridBot:
             # Reset the decay timer on error
             self.grid_settings[trading_pair]['last_order_time'] = 0
 
-    """
-    Calculates the optimal sell amount to ensure minimum profit after fees.
-    
-    Args:
-        trading_pair (str): Trading pair symbol
-        buy_amount (float): Buy amount for the trading pair
-        current_price (float): Current price of the trading pair
-        
-    Returns:
-        float: Optimal sell amount
-    """
-    async def calculate_optimal_sell_amount(self, trading_pair: str, buy_amount: float, current_price: float) -> float:
-        """Calculate sell amount - will sell 100% of bought amount."""
-        grid_interval = self.grid_settings[trading_pair]['grid_interval']
-        trail_interval = self.grid_settings[trading_pair]['trail_interval']
-        interval_amount = current_price * (grid_interval / 100)
-        
-        # Calculate prices
-        buy_price = current_price - ((current_price * trail_interval)/100)
-        sell_price = current_price + interval_amount
-        
-        # Calculate total cost of buy (including fees)
-        buy_cost = buy_amount * buy_price
-        buy_fee = buy_cost * KRAKEN_FEE
-        total_buy_cost = buy_cost + buy_fee
-        
-        # Calculate expected sell revenue and profit
-        sell_revenue = buy_amount * sell_price
-        sell_fee = sell_revenue * KRAKEN_FEE
-        expected_profit = sell_revenue - sell_fee - total_buy_cost
-        
-        # Return the full buy amount as the sell amount
-        return buy_amount
-
 
 """
 Main function to run the grid trading bot.
@@ -1556,7 +1440,6 @@ async def main():
             Logger.success("Successfully disconnected from all Kraken WebSocket streams.")
         except Exception as e:
             Logger.error(f"Shutdown error details:\n{traceback.format_exc()}")
-
 
 if __name__ == "__main__":
     try:
