@@ -19,12 +19,11 @@ TRADING_PAIRS = {
     pair: {
         'size': size,
         'grid_interval': grid,
-        'grid_spacing': spacing,
-        'trail_interval': spacing,
+        'trail_interval': trail,
         'precision': precision,
         'sell_multiplier': sell_multiplier 
     }
-    for pair, (size, grid, spacing, precision, sell_multiplier) in {
+    for pair, (size, grid, trail, precision, sell_multiplier) in {
         "BTC/USD": (0.00085, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
         "SOL/USD": (0.06, 1.5, 1.5, 2, 0.999), # 13-16%      
         "XRP/USD": (5.0, 3.5, 3.5, 5, 0.999), # 0%          
