@@ -22,14 +22,14 @@ For more details about Kraken's API, visit: https://docs.kraken.com/api/
 - **Compound Returns**: Combines trading profits with staking rewards for enhanced yield
 
 ## Project Structure
-
+```
 DioGrid/
 ├── diogrid.py          # The main trading bot script
 ├── .env               # Environment variables and API credentials
 ├── requirements.txt   # Python package dependencies
 ├── Dockerfile        # Docker configuration for containerization
 └── README.md         # Project documentation
-
+```
 
 ## Installation
 
