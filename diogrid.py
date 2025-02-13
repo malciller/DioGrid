@@ -1235,8 +1235,7 @@ class KrakenGridBot:
                 return False
             else:
                 # Log that order is within acceptable range
-                #Logger.success(f"ORDER: {trading_pair} - OK")
-                pass
+                Logger.success(f"ORDER: {trading_pair} - OK")
         return True
     """
     Updates an existing order's price using the amend_order endpoint.
