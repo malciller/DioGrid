@@ -210,7 +210,7 @@ class KrakenWebSocketClient:
                         timeout=self.ws_timeout
                     )
                     self.connection_status['private']['connected'] = True
-                    Logger.success("Connected to private WebSocket")
+                    Logger.success("CONNECTION: PRIVATE - 200 - OK")
                 except Exception as e:
                     Logger.error(f"Private WebSocket connection failed: {str(e)}")
                     raise
@@ -225,7 +225,7 @@ class KrakenWebSocketClient:
                         timeout=self.ws_timeout
                     )
                     self.connection_status['public']['connected'] = True
-                    Logger.success("Connected to public WebSocket")
+                    Logger.success("CONNECTION: PUBLIC - 200 - OK")
                 except Exception as e:
                     Logger.error(f"Public WebSocket connection failed: {str(e)}")
                     # Close private connection if public fails
