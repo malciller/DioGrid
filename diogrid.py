@@ -112,8 +112,6 @@ class KrakenWebSocketClient:
         self.highest_portfolio_value = STARTING_PORTFOLIO_INVESTMENT
         self.ticker_subscriptions = {}  
         self.public_message_task = None
-        self.earn_strategies = {}  
-        self.strategy_ids = {}    
         self.earn_balances = {}  
         self.subscribed_channels = set()  
         self.subscription_lock = asyncio.Lock()  
@@ -131,6 +129,8 @@ class KrakenWebSocketClient:
         self.max_backoff = 300      # Max 5 minutes
         self.backoff_factor = 2     # Double the delay each time
         self.jitter = 0.1           # Add 10% random jitter
+        self.earn_strategies = {}
+        self.strategy_ids = {}
     """
     Generates a Kraken API signature for authentication.
     
@@ -231,19 +231,25 @@ class KrakenWebSocketClient:
                 attempt += 1
                 
         raise Exception(f"Failed to connect after {self.max_reconnect_attempts} attempts")
-
+    """
+    Establishes initial WebSocket connection with backoff retry logic.
+    Creates and starts maintenance tasks for connection monitoring and message handling.
+    
+    Returns:
+        str: Authentication token from successful connection
+        
+    Raises:
+        Exception: If initial connection fails
+    """
     async def connect(self):
         """Initial connection with backoff."""
         try:
             token = await self.connect_with_backoff()
-            
             # Start maintenance tasks
             self.maintenance_task = asyncio.create_task(self.maintain_connection())
             self.message_task = asyncio.create_task(self.handle_messages())
             self.public_message_task = asyncio.create_task(self.handle_public_messages())
-            
             return token
-            
         except Exception as e:
             Logger.error(f"Initial connection failed: {str(e)}")
             await self.disconnect()
@@ -381,7 +387,6 @@ class KrakenWebSocketClient:
     async def reconnect(self):
         """Reconnect to WebSocket endpoints with backoff."""
         Logger.info("Starting reconnection process...")
-        
         try:
             # Cancel existing tasks
             tasks = [self.maintenance_task, self.message_task, self.public_message_task]
@@ -392,12 +397,10 @@ class KrakenWebSocketClient:
                         await task
                     except asyncio.CancelledError:
                         pass
-
             # Reset task attributes
             self.maintenance_task = None
             self.message_task = None
             self.public_message_task = None
-            
             # Close existing connections
             try:
                 if self.websocket:
@@ -406,30 +409,23 @@ class KrakenWebSocketClient:
                     await self.public_websocket.close()
             except Exception as e:
                 Logger.warning(f"Error closing existing connections: {str(e)}")
-
             # Connect with backoff
             token = await self.connect_with_backoff()
-            
             # Reset connection status
             self.connection_status['private']['last_ping'] = time.time()
             self.connection_status['private']['last_pong'] = time.time()
             self.last_ticker_time = time.time()
-            
             # Restart message handling tasks
             self.message_task = asyncio.create_task(self.handle_messages())
             self.public_message_task = asyncio.create_task(self.handle_public_messages())
             self.maintenance_task = asyncio.create_task(self.maintain_connection())
-            
             # Resubscribe to channels
             await self.subscribe(['balances', 'executions'], token)
-            
             # Resubscribe to active trading pairs
             if self.active_trading_pairs:
                 await self.subscribe_ticker(list(self.active_trading_pairs))
-
             Logger.success("Successfully reconnected to WebSocket")
             return True
-
         except Exception as e:
             Logger.error(f"Reconnection failed: {str(e)}")
             self.running = False
@@ -483,10 +479,8 @@ class KrakenWebSocketClient:
                     timeout=self.ws_timeout
                 )
                 data = json.loads(message)
-                
                 # Update last ticker time for any valid message
                 self.last_ticker_time = time.time()
-                
                 if isinstance(data, dict):
                     if data.get('event') == 'error':
                         Logger.error(f"WebSocket error: {data.get('error')}")
@@ -497,10 +491,8 @@ class KrakenWebSocketClient:
                         if not data.get('success') and data.get('error'):
                             Logger.error(f"WebSocket subscription error: {data.get('error')}")
                         continue
-                
                 if data.get('channel') == 'ticker':
-                    await self.handle_ticker(data)
-                    
+                    await self.handle_ticker(data) 
             except asyncio.TimeoutError:
                 Logger.warning("Public message receive timeout, checking connection...")
                 if not self.public_websocket.open:
@@ -975,7 +967,6 @@ class KrakenWebSocketClient:
             raise KrakenAPIError('EService:Unavailable', f"HTTP request failed: {str(e)}")
         except Exception as e:
             raise KrakenAPIError('EGeneral:Internal error', str(e))
-
     """
         Calculate available spot balance for an asset by checking:
         1. Total balance
@@ -1017,6 +1008,16 @@ class KrakenWebSocketClient:
         except Exception as e:
             Logger.error(f"Error calculating available balance for {asset}: {str(e)}")
             return 0.0
+
+    async def initialize(self):
+        """Initialize async components"""
+        try:
+            self.earn_strategies = await self.get_earn_strategies()
+            self.strategy_ids = {asset: data['id'] for asset, data in self.earn_strategies.items()}
+            return self
+        except Exception as e:
+            Logger.error(f"Failed to initialize earn strategies: {str(e)}")
+            return self
 
 class KrakenGridBot:
     def __init__(self, client: KrakenWebSocketClient):
@@ -1102,7 +1103,7 @@ class KrakenGridBot:
             if order_id not in self.client.orders:
                 Logger.success(f"Successfully canceled order {order_id}")
             else:
-                Logger.warning(f"Warning: Order {order_id} may not have been canceled")    
+                Logger.warning(f"ORDER: {order_id} may not have been canceled")    
         except Exception as e:
             Logger.error(f"Error sending cancel request: {str(e)}")
             raise
@@ -1177,7 +1178,7 @@ class KrakenGridBot:
             return None
         # If multiple buy orders exist (shouldn't happen), keep most recent
         if len(open_orders) > 1:
-            Logger.warning(f"Warning: Found {len(open_orders)} buy orders for {trading_pair}")
+            Logger.warning(f"ORDER: TOO MANY {trading_pair} ORDERS")
             kept_order = sorted(open_orders, key=lambda x: x.get('time', 0), reverse=True)[0]
             for order in open_orders:
                 if order['order_id'] != kept_order['order_id']:
@@ -1233,9 +1234,6 @@ class KrakenGridBot:
                 target_price = target_price * 1.0001
                 await self.update_order_price(trading_pair, open_order, target_price)
                 return False
-            else:
-                # Log that order is within acceptable range
-                Logger.success(f"ORDER: {trading_pair} - OK")
         return True
     """
     Updates an existing order's price using the amend_order endpoint.
@@ -1358,7 +1356,7 @@ class KrakenGridBot:
                     return    
                 self.grid_settings[trading_pair]['active_orders'].add(order_id)
                 self.grid_orders[trading_pair]['buy'] = order_id
-                Logger.success(f"Grid buy order placed for {trading_pair} with ID: {order_id}")
+                Logger.success(f"ORDER: Grid buy order placed for {trading_pair} with ID: {order_id}")
                 # Try to place corresponding sell order
                 try:
                     sell_req_id = int(time.time() * 1000)
@@ -1380,9 +1378,9 @@ class KrakenGridBot:
                         sell_order_id = sell_response.get('result', {}).get('order_id')
                         if sell_order_id:
                             self.grid_orders[trading_pair]['sell'] = sell_order_id
-                            Logger.success(f"Grid sell order placed for {trading_pair} with ID: {sell_order_id}")
+                            Logger.success(f"ORDER: Grid sell order placed for {trading_pair} with ID: {sell_order_id}")
                         else:
-                            Logger.warning(f"Sell order placed but no ID received for {trading_pair}")
+                            Logger.warning(f"ORDER: Sell order placed but no ID received for {trading_pair}")
                     else:
                         pass
                 except Exception as sell_error:
@@ -1396,7 +1394,7 @@ class KrakenGridBot:
 
 async def main():
     """Main function to establish WebSocket connection and manage subscriptions."""
-    client = KrakenWebSocketClient()
+    client = await KrakenWebSocketClient().initialize()
     grid_bot = KrakenGridBot(client)
     max_retries = 3
     retry_delay = 5
@@ -1415,12 +1413,16 @@ async def main():
             await grid_bot.start()
             while client.running:
                 try:
+                    all_orders_valid = True
                     for pair in TRADING_PAIRS:
                         # Check if we have valid orders within our grid
                         current_order = await grid_bot.check_open_orders(pair)
                         if current_order:
                             # If we have an order, check if it's still valid
-                            await grid_bot.check_open_orders_open_order_interval(pair, current_order)
+                            order_valid = await grid_bot.check_open_orders_open_order_interval(pair, current_order)
+                            all_orders_valid = all_orders_valid and order_valid
+                    if all_orders_valid:
+                        Logger.success("ORDERS: 200 - OK")
                     await asyncio.sleep(LONG_SLEEP_TIME)
                 except websockets.exceptions.ConnectionClosed:
                     Logger.warning("Connection lost, attempting to reconnect...")
