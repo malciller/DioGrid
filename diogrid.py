@@ -300,6 +300,7 @@ class KrakenWebSocketClient:
                 current_time = time.time()
                 needs_reconnect = False
                 status = self.connection_status['private']
+                
                 # Check private connection health
                 time_since_pong = current_time - status['last_pong']
                 if current_time - status['last_ping'] >= self.ping_interval:
@@ -309,43 +310,48 @@ class KrakenWebSocketClient:
                     except Exception as e:
                         Logger.warning(f"Failed to send ping: {str(e)}")
                         needs_reconnect = True
+
                 # Check public connection health via ticker data
                 time_since_ticker = current_time - self.last_ticker_time
                 if time_since_ticker > self.ping_interval:
                     Logger.warning(f"No ticker data received for {time_since_ticker:.1f}s")
-                    # Send a ping to public websocket to check connection
-                    try:
-                        ping_message = {
-                            "method": "ping",
-                            "req_id": int(current_time * 1000)
-                        }
-                        await self.public_websocket.send(json.dumps(ping_message))
-                        # Wait for pong response
+                    # Use a lock to prevent concurrent recv calls
+                    if not hasattr(self, '_public_ping_lock'):
+                        self._public_ping_lock = asyncio.Lock()
+                        
+                    async with self._public_ping_lock:
                         try:
-                            response = await asyncio.wait_for(
-                                self.public_websocket.recv(),
-                                timeout=self.pong_timeout
-                            )
-                            pong_data = json.loads(response)
-                            if pong_data.get('method') == 'pong':
-                                self.last_ticker_time = current_time  # Reset ticker time on successful pong
-                                Logger.info("Public WebSocket ping successful")
-                                continue
-                        except asyncio.TimeoutError:
-                            Logger.warning("No pong response received from public WebSocket")
+                            ping_message = {
+                                "method": "ping",
+                                "req_id": int(current_time * 1000)
+                            }
+                            await self.public_websocket.send(json.dumps(ping_message))
+                            try:
+                                response = await asyncio.wait_for(
+                                    self.public_websocket.recv(),
+                                    timeout=self.pong_timeout
+                                )
+                                pong_data = json.loads(response)
+                                if pong_data.get('method') == 'pong':
+                                    self.last_ticker_time = current_time
+                                    Logger.info("Public WebSocket ping successful")
+                                    continue
+                            except asyncio.TimeoutError:
+                                Logger.warning("No pong response received from public WebSocket")
+                                needs_reconnect = True
+                        except Exception as e:
+                            Logger.warning(f"Failed to ping public websocket: {str(e)}")
                             needs_reconnect = True
-                    except Exception as e:
-                        Logger.warning(f"Failed to ping public websocket: {str(e)}")
-                        needs_reconnect = True
+
                 if time_since_ticker > self.ping_interval + self.pong_timeout:
                     needs_reconnect = True
+
                 if needs_reconnect:
                     if reconnect_attempts < self.max_reconnect_attempts:
                         reconnect_attempts += 1
                         Logger.warning(f"Connection issues detected. Attempting reconnection (attempt {reconnect_attempts}/{self.max_reconnect_attempts})")
                         try:
                             await self.reconnect()
-                            # Reset reconnect counter on successful reconnection
                             reconnect_attempts = 0
                             continue
                         except Exception as e:
@@ -354,6 +360,7 @@ class KrakenWebSocketClient:
                         Logger.error("Max reconnection attempts reached")
                         self.running = False
                         break
+
                 await asyncio.sleep(LONG_SLEEP_TIME)
         except asyncio.CancelledError:
             pass
@@ -656,7 +663,7 @@ class KrakenWebSocketClient:
                     value = balance * price
                     total_value += value
         self.portfolio_value = total_value
-        Logger.success(f"PORTFOLIO VALUE: ${total_value:,.2f}")
+        Logger.success(f"BALANCE: 200 - OK")
         # Check if we should take profit
         if PASSIVE_INCOME == 1:
             await self.check_and_take_profit()
@@ -998,7 +1005,6 @@ class KrakenWebSocketClient:
             # Calculate available balance
             available_balance = total_balance - amount_in_orders - amount_in_earn
             if amount_in_orders > 0:
-                #Logger.info("\n  Sell Orders Detail:")
                 for order in self.orders.values():
                     if (order.get('symbol', '').startswith(asset + '/') and 
                         order.get('side') == 'sell' and
@@ -1101,7 +1107,7 @@ class KrakenGridBot:
             await asyncio.sleep(LONG_SLEEP_TIME)
             # Verify the order was removed from client.orders
             if order_id not in self.client.orders:
-                Logger.success(f"Successfully canceled order {order_id}")
+                Logger.success(f"ORDER: CANCELED {order_id}")
             else:
                 Logger.warning(f"ORDER: {order_id} may not have been canceled")    
         except Exception as e:
@@ -1170,7 +1176,7 @@ class KrakenGridBot:
                                     if result.get('error'):
                                         Logger.error(f"Error allocating {asset} to earn: {result['error']}")
                                     else:
-                                        Logger.success(f"Successfully initiated earn allocation for {formatted_amount} {asset}")
+                                        Logger.success(f"EARN: 200 - OK")
                         except Exception as e:
                             Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
         else:
