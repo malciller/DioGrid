@@ -88,7 +88,8 @@ class KrakenWebSocketClient:
         self.public_websocket = None  
         self.running = True
         self.connection_status = {
-            'private': {'last_ping': time.time(), 'last_pong': time.time()},
+            'private': {'connected': False, 'last_ping': time.time(), 'last_pong': time.time()},
+            'public': {'connected': False, 'last_ping': time.time(), 'last_pong': time.time()}
         }
         self.last_ticker_time = time.time()  
         self.ping_interval = 15
@@ -194,42 +195,67 @@ class KrakenWebSocketClient:
         """Connect to WebSocket with exponential backoff."""
         current_backoff = self.initial_backoff
         attempt = 0
+        
         while attempt < self.max_reconnect_attempts:
             try:
+                # First try to get the auth token
                 token = await self.get_ws_token()
                 if not token:
                     raise KrakenAPIError('EAPI:Invalid key', 'Failed to obtain WebSocket token')
-                
-                # Establish connections with timeout
-                self.websocket = await asyncio.wait_for(
-                    websockets.connect(self.ws_auth_url, **self.ws_options),
-                    timeout=self.ws_timeout
-                )
-                self.public_websocket = await asyncio.wait_for(
-                    websockets.connect(self.ws_public_url, **self.ws_options),
-                    timeout=self.ws_timeout
-                )
-                # Reset backoff on successful connection
+
+                # Try private connection first
+                try:
+                    self.websocket = await asyncio.wait_for(
+                        websockets.connect(self.ws_auth_url, **self.ws_options),
+                        timeout=self.ws_timeout
+                    )
+                    self.connection_status['private']['connected'] = True
+                    Logger.success("Connected to private WebSocket")
+                except Exception as e:
+                    Logger.error(f"Private WebSocket connection failed: {str(e)}")
+                    raise
+
+                # Add delay before public connection attempt
+                await asyncio.sleep(1)
+
+                # Then try public connection
+                try:
+                    self.public_websocket = await asyncio.wait_for(
+                        websockets.connect(self.ws_public_url, **self.ws_options),
+                        timeout=self.ws_timeout
+                    )
+                    self.connection_status['public']['connected'] = True
+                    Logger.success("Connected to public WebSocket")
+                except Exception as e:
+                    Logger.error(f"Public WebSocket connection failed: {str(e)}")
+                    # Close private connection if public fails
+                    if self.websocket:
+                        await self.websocket.close()
+                    raise
+
                 return token
-                
+
             except websockets.exceptions.InvalidStatus as e:
                 if "HTTP 429" in str(e):
                     Logger.warning(f"Rate limit hit. Backing off for {current_backoff} seconds...")
-                    # Add random jitter to prevent thundering herd
                     jitter_amount = random.uniform(-self.jitter, self.jitter)
                     backoff_with_jitter = current_backoff * (1 + jitter_amount)
                     await asyncio.sleep(backoff_with_jitter)
-                    # Increase backoff for next attempt
                     current_backoff = min(current_backoff * self.backoff_factor, self.max_backoff)
                     attempt += 1
                     continue
                 else:
                     raise
+
             except Exception as e:
                 Logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
                 await asyncio.sleep(self.reconnect_delay)
                 attempt += 1
                 
+                # Reset connection status
+                self.connection_status['private']['connected'] = False
+                self.connection_status['public']['connected'] = False
+
         raise Exception(f"Failed to connect after {self.max_reconnect_attempts} attempts")
     """
     Establishes initial WebSocket connection with backoff retry logic.
@@ -299,52 +325,44 @@ class KrakenWebSocketClient:
             while self.running:
                 current_time = time.time()
                 needs_reconnect = False
-                status = self.connection_status['private']
-                
-                # Check private connection health
-                time_since_pong = current_time - status['last_pong']
-                if current_time - status['last_ping'] >= self.ping_interval:
-                    try:
-                        await self.ping()
-                        status['last_ping'] = current_time
-                    except Exception as e:
-                        Logger.warning(f"Failed to send ping: {str(e)}")
-                        needs_reconnect = True
 
-                # Check public connection health via ticker data
-                time_since_ticker = current_time - self.last_ticker_time
-                if time_since_ticker > self.ping_interval:
-                    Logger.warning(f"No ticker data received for {time_since_ticker:.1f}s")
-                    # Use a lock to prevent concurrent recv calls
-                    if not hasattr(self, '_public_ping_lock'):
-                        self._public_ping_lock = asyncio.Lock()
-                        
-                    async with self._public_ping_lock:
+                # Check private connection health
+                if self.connection_status['private']['connected']:
+                    time_since_pong = current_time - self.connection_status['private']['last_pong']
+                    if current_time - self.connection_status['private']['last_ping'] >= self.ping_interval:
                         try:
-                            ping_message = {
-                                "method": "ping",
-                                "req_id": int(current_time * 1000)
-                            }
-                            await self.public_websocket.send(json.dumps(ping_message))
-                            try:
-                                response = await asyncio.wait_for(
-                                    self.public_websocket.recv(),
-                                    timeout=self.pong_timeout
-                                )
-                                pong_data = json.loads(response)
-                                if pong_data.get('method') == 'pong':
-                                    self.last_ticker_time = current_time
-                                    Logger.info("Public WebSocket ping successful")
-                                    continue
-                            except asyncio.TimeoutError:
-                                Logger.warning("No pong response received from public WebSocket")
-                                needs_reconnect = True
+                            await self.ping()
+                            self.connection_status['private']['last_ping'] = current_time
                         except Exception as e:
-                            Logger.warning(f"Failed to ping public websocket: {str(e)}")
+                            Logger.warning(f"Failed to send private ping: {str(e)}")
                             needs_reconnect = True
 
-                if time_since_ticker > self.ping_interval + self.pong_timeout:
-                    needs_reconnect = True
+                # Check public connection health
+                if self.connection_status['public']['connected']:
+                    time_since_ticker = current_time - self.last_ticker_time
+                    if time_since_ticker > self.ping_interval:
+                        async with self._public_ping_lock:
+                            try:
+                                ping_message = {
+                                    "method": "ping",
+                                    "req_id": int(current_time * 1000)
+                                }
+                                await self.public_websocket.send(json.dumps(ping_message))
+                                try:
+                                    response = await asyncio.wait_for(
+                                        self.public_websocket.recv(),
+                                        timeout=self.pong_timeout
+                                    )
+                                    pong_data = json.loads(response)
+                                    if pong_data.get('method') == 'pong':
+                                        self.last_ticker_time = current_time
+                                        continue
+                                except asyncio.TimeoutError:
+                                    Logger.warning("No pong response from public WebSocket")
+                                    needs_reconnect = True
+                            except Exception as e:
+                                Logger.warning(f"Failed to ping public websocket: {str(e)}")
+                                needs_reconnect = True
 
                 if needs_reconnect:
                     if reconnect_attempts < self.max_reconnect_attempts:
@@ -356,6 +374,7 @@ class KrakenWebSocketClient:
                             continue
                         except Exception as e:
                             Logger.error(f"Reconnection attempt failed: {str(e)}")
+                            await asyncio.sleep(self.backoff_factor ** reconnect_attempts)
                     else:
                         Logger.error("Max reconnection attempts reached")
                         self.running = False
@@ -404,35 +423,58 @@ class KrakenWebSocketClient:
                         await task
                     except asyncio.CancelledError:
                         pass
+
             # Reset task attributes
             self.maintenance_task = None
             self.message_task = None
             self.public_message_task = None
-            # Close existing connections
-            try:
-                if self.websocket:
+
+            # Close existing connections gracefully
+            if self.websocket and self.connection_status['private']['connected']:
+                try:
                     await self.websocket.close()
-                if self.public_websocket:
+                except Exception as e:
+                    Logger.warning(f"Error closing private connection: {str(e)}")
+                self.connection_status['private']['connected'] = False
+
+            if self.public_websocket and self.connection_status['public']['connected']:
+                try:
                     await self.public_websocket.close()
-            except Exception as e:
-                Logger.warning(f"Error closing existing connections: {str(e)}")
+                except Exception as e:
+                    Logger.warning(f"Error closing public connection: {str(e)}")
+                self.connection_status['public']['connected'] = False
+
+            # Wait before attempting reconnection
+            await asyncio.sleep(self.reconnect_delay)
+
             # Connect with backoff
             token = await self.connect_with_backoff()
-            # Reset connection status
-            self.connection_status['private']['last_ping'] = time.time()
-            self.connection_status['private']['last_pong'] = time.time()
-            self.last_ticker_time = time.time()
+
+            # Reset connection status timestamps
+            current_time = time.time()
+            self.connection_status['private'].update({
+                'last_ping': current_time,
+                'last_pong': current_time
+            })
+            self.connection_status['public'].update({
+                'last_ping': current_time,
+                'last_pong': current_time
+            })
+            self.last_ticker_time = current_time
+
             # Restart message handling tasks
             self.message_task = asyncio.create_task(self.handle_messages())
             self.public_message_task = asyncio.create_task(self.handle_public_messages())
             self.maintenance_task = asyncio.create_task(self.maintain_connection())
+
             # Resubscribe to channels
             await self.subscribe(['balances', 'executions'], token)
-            # Resubscribe to active trading pairs
             if self.active_trading_pairs:
                 await self.subscribe_ticker(list(self.active_trading_pairs))
+
             Logger.success("Successfully reconnected to WebSocket")
             return True
+
         except Exception as e:
             Logger.error(f"Reconnection failed: {str(e)}")
             self.running = False
