@@ -227,7 +227,6 @@ class KrakenWebSocketClient:
                     )
                     self.connection_status['public']['connected'] = True
                     Logger.success("CONNECTION: PUBLIC - 200 - OK")
-                    return token  # Return token only after both connections are successful
                 except Exception as e:
                     Logger.error(f"Public WebSocket connection failed: {str(e)}")
                     # Close private connection if public fails
@@ -1376,7 +1375,6 @@ class KrakenGridBot:
         try:
             # Generate request ID for buy order
             buy_req_id = int(time.time() * 1000)
-            
             # Place buy order with correct buy_size
             buy_order_msg = {
                 "method": "add_order",
@@ -1449,25 +1447,23 @@ async def main():
     max_retries = 3
     retry_delay = 5
     retry_count = 0
-    
-    while retry_count < max_retries:
+    while True:
         try:
-            # Connect and set up WebSocket handlers
+            # Attempt the WebSocket connection
             token = await client.connect()
             if not token:
                 raise Exception("Failed to obtain connection token")
-
+            # Set up WebSocket handlers
             client.set_handler('balances', client.handle_balance_updates)
             client.set_handler('executions', client.handle_execution_updates)
             client.set_handler('ticker', client.handle_ticker)
+            # Subscribe to the channels we need
             await client.subscribe(['balances', 'executions'], token)
-            
-            # Reset retry count on successful connection
+            # On successful connect/subscription, reset retry counter
             retry_count = 0
-            
             # Start the grid bot
             await grid_bot.start()
-            
+            # Main trading loop
             while client.running:
                 try:
                     all_orders_valid = True
@@ -1480,35 +1476,48 @@ async def main():
                         Logger.success("ORDERS: 200 - OK")
                     await asyncio.sleep(LONG_SLEEP_TIME)
                 except websockets.exceptions.ConnectionClosed:
-                    Logger.warning("Connection lost, attempting to reconnect...")
+                    # If the connection drops in the trading loop, propagate to outer try/except
+                    Logger.warning("Connection lost in trading loop, attempting to reconnect...")
+                    raise
+                except asyncio.CancelledError:
+                    # If the task is cancelled externally, we re-raise so it stops gracefully
                     raise
                 except Exception as e:
                     Logger.error(f"Error in trading loop: {str(e)}")
                     await asyncio.sleep(LONG_SLEEP_TIME)
-                    
         except (websockets.exceptions.ConnectionClosed, KrakenAPIError) as e:
-            retry_count += 1
+            # We hit a connection-level issue or a Kraken-level error
             if retry_count < max_retries:
+                retry_count += 1
                 Logger.warning(f"Connection lost. Attempting reconnection {retry_count}/{max_retries}")
-                await client.disconnect()
+                # Clean up existing connection before retrying
+                try:
+                    await client.disconnect()
+                except Exception as cleanup_error:
+                    Logger.error(f"Error during cleanup: {str(cleanup_error)}")
+
                 await asyncio.sleep(retry_delay)
                 continue
             else:
                 Logger.error("Max reconnection attempts reached. Exiting.")
                 break
-                
         except KeyboardInterrupt:
+            # Graceful shutdown on Ctrl+C
             Logger.info("Keyboard interrupt received. Shutting down...")
             break
-            
         except Exception as e:
             Logger.error(f"Unexpected error: {str(e)}\n{traceback.format_exc()}")
-            retry_count += 1
             if retry_count < max_retries:
+                retry_count += 1
                 await asyncio.sleep(retry_delay)
                 continue
             else:
+                Logger.error("Max error retries reached. Exiting.")
                 break
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     try:
