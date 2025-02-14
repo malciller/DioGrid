@@ -235,6 +235,8 @@ class KrakenWebSocketClient:
                         await self.websocket.close()
                     raise
 
+                return token
+
             except websockets.exceptions.InvalidStatus as e:
                 if "HTTP 429" in str(e):
                     Logger.warning(f"Rate limit hit. Backing off for {current_backoff} seconds...")
