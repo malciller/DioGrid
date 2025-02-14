@@ -47,7 +47,7 @@ load_dotenv()
 class Logger:
     ERROR = '\033[91m'    
     WARNING = '\033[93m' 
-    INFO = '\033[94m'     
+    INFO = '\033[96m'     
     SUCCESS = '\033[92m' 
     RESET = '\033[0m'    
     @staticmethod
@@ -338,32 +338,12 @@ class KrakenWebSocketClient:
                             Logger.warning(f"Failed to send private ping: {str(e)}")
                             needs_reconnect = True
 
-                # Check public connection health
+                # Check public connection health using last ticker time instead of explicit ping
                 if self.connection_status['public']['connected']:
                     time_since_ticker = current_time - self.last_ticker_time
-                    if time_since_ticker > self.ping_interval:
-                        async with self._public_ping_lock:
-                            try:
-                                ping_message = {
-                                    "method": "ping",
-                                    "req_id": int(current_time * 1000)
-                                }
-                                await self.public_websocket.send(json.dumps(ping_message))
-                                try:
-                                    response = await asyncio.wait_for(
-                                        self.public_websocket.recv(),
-                                        timeout=self.pong_timeout
-                                    )
-                                    pong_data = json.loads(response)
-                                    if pong_data.get('method') == 'pong':
-                                        self.last_ticker_time = current_time
-                                        continue
-                                except asyncio.TimeoutError:
-                                    Logger.warning("No pong response from public WebSocket")
-                                    needs_reconnect = True
-                            except Exception as e:
-                                Logger.warning(f"Failed to ping public websocket: {str(e)}")
-                                needs_reconnect = True
+                    if time_since_ticker > self.ping_interval * 2:  # Allow more time before triggering reconnect
+                        Logger.warning("No recent ticker updates, connection may be stale")
+                        needs_reconnect = True
 
                 if needs_reconnect:
                     if reconnect_attempts < self.max_reconnect_attempts:
@@ -431,19 +411,23 @@ class KrakenWebSocketClient:
             self.public_message_task = None
 
             # Close existing connections gracefully
-            if self.websocket and self.connection_status['private']['connected']:
+            if self.websocket:
                 try:
                     await self.websocket.close()
                 except Exception as e:
                     Logger.warning(f"Error closing private connection: {str(e)}")
-                self.connection_status['private']['connected'] = False
-
-            if self.public_websocket and self.connection_status['public']['connected']:
+                self.websocket = None
+            
+            if self.public_websocket:
                 try:
                     await self.public_websocket.close()
                 except Exception as e:
                     Logger.warning(f"Error closing public connection: {str(e)}")
-                self.connection_status['public']['connected'] = False
+                self.public_websocket = None
+
+            # Reset connection status
+            self.connection_status['private']['connected'] = False
+            self.connection_status['public']['connected'] = False
 
             # Wait before attempting reconnection
             await asyncio.sleep(self.reconnect_delay)
@@ -473,12 +457,16 @@ class KrakenWebSocketClient:
             if self.active_trading_pairs:
                 await self.subscribe_ticker(list(self.active_trading_pairs))
 
-            Logger.success("CONNECTION: RECONNECT - 200 - OK")
+            Logger.success("Reconnection successful")
             return True
 
         except Exception as e:
             Logger.error(f"Reconnection failed: {str(e)}")
-            self.running = False
+            # Reset websocket objects on failure
+            self.websocket = None
+            self.public_websocket = None
+            self.connection_status['private']['connected'] = False
+            self.connection_status['public']['connected'] = False
             raise
     """
     Processes incoming messages from the private WebSocket connection.
@@ -1035,6 +1023,10 @@ class KrakenWebSocketClient:
             total_balance = self.balances.get(asset, 0.0)
             if total_balance <= 0:
                 return 0.0
+
+            if asset == "INJ":
+                Logger.info(f"DEBUG {asset}: Total balance: {total_balance}")
+            
             # Calculate amount in open sell orders
             amount_in_orders = 0.0
             for order in self.orders.values():
@@ -1043,16 +1035,19 @@ class KrakenWebSocketClient:
                     order.get('order_status') in ['new', 'partially_filled']):
                     order_qty = float(order.get('order_qty', 0.0))
                     amount_in_orders += order_qty
-            # Get amount in earn wallet
+ 
+
             amount_in_earn = self.earn_balances.get(asset, 0.0)
+            
+            if asset == "INJ":
+                Logger.info(f"DEBUG {asset}: Amount in orders: {amount_in_orders}, Amount in earn: {amount_in_earn}")
+            
             # Calculate available balance
             available_balance = total_balance - amount_in_orders - amount_in_earn
-            if amount_in_orders > 0:
-                for order in self.orders.values():
-                    if (order.get('symbol', '').startswith(asset + '/') and 
-                        order.get('side') == 'sell' and
-                        order.get('order_status') in ['new', 'partially_filled']):
-                        order_qty = float(order.get('order_qty', 0.0))
+            
+            if asset == "INJ":
+                Logger.info(f"DEBUG {asset}: Final available balance: {available_balance}")
+            
             return max(0.0, available_balance)
         except Exception as e:
             Logger.error(f"Error calculating available balance for {asset}: {str(e)}")
