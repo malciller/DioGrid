@@ -26,14 +26,14 @@ TRADING_PAIRS = {
     }
     for pair, (size, grid, trail, precision, sell_multiplier) in {
         "BTC/USD": (0.000875, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
-        "SOL/USD": (0.06, 2.5, 2.5, 2, 0.999), # 13-16%      
-        "XRP/USD": (5.0, 3.5, 3.5, 5, 0.999), # 0%          
-        "ADA/USD": (18.0, 3.5, 3.5, 6, 0.999), # 2-5% 
-        "ETH/USD": (0.0045, 3.5, 3.5, 2, 0.999), # 2-7%   
-        "TRX/USD": (55.0, 3.5, 3.5, 6, 0.999), # 4-7%      
-        "DOT/USD": (2.5, 3.5, 3.5, 4, 0.999), # 12-18% 
-        "INJ/USD": (0.81, 3.5, 3.5, 3, 0.999), # 7-11%
-        "KSM/USD": (0.6, 3.5, 3.5, 2, 0.999), # 16-24%
+        "SOL/USD": (0.06, 2.5, 2.5, 2, 0.999), # 13-16%   
+        "XRP/USD": (5.0, 3.0, 3.0, 5, 0.999), # 0%          
+        "ADA/USD": (18.0, 3.0, 3.0, 6, 0.999), # 2-5% 
+        "ETH/USD": (0.0045, 3.0, 3.0, 2, 0.999), # 2-7%   
+        "TRX/USD": (55.0, 3.0, 3.0, 6, 0.999), # 4-7%      
+        "DOT/USD": (2.5, 3.0, 3.0, 4, 0.999), # 12-18% 
+        "INJ/USD": (0.81, 3.0, 3.0, 3, 0.999), # 7-11%
+        "KSM/USD": (0.6, 3.0, 3.0, 2, 0.999), # 16-24% 
     }.items()
 }
 SHORT_SLEEP_TIME = 0.1
@@ -747,35 +747,42 @@ class KrakenWebSocketClient:
         if data.get('type') in ['snapshot', 'update']:
             # Keep track of all assets with non-zero balances
             assets_with_balance = set()
+            
+            # First, process all wallet data to ensure accurate earn balances
             for asset_data in data.get('data', []):
                 asset_code = asset_data.get('asset')
-                # Reset earn balance for this asset
+                # Initialize earn balance for this asset
                 self.earn_balances[asset_code] = 0.0
+                
+                # Process wallets
+                wallets = asset_data.get('wallets', [])
+                if wallets:
+                    # Sum up all earn-related wallet balances
+                    earn_balance = sum(
+                        float(wallet.get('balance', 0))
+                        for wallet in wallets
+                        if wallet.get('type') in ['earn', 'bonded', 'locked']
+                    )
+                    self.earn_balances[asset_code] = earn_balance
+
+            # Now process total balances and check for staking opportunities
+            for asset_data in data.get('data', []):
+                asset_code = asset_data.get('asset')
                 # Process wallets
                 wallets = asset_data.get('wallets', [])
                 total_balance = 0.0
                 if wallets:
-                    # If we have wallet data, process each wallet
-                    for wallet in wallets:
-                        wallet_type = wallet.get('type')
-                        wallet_balance = float(wallet.get('balance', 0))
-                        # Store earn wallet balances separately
-                        if wallet_type in ['earn', 'bonded', 'locked']:
-                            self.earn_balances[asset_code] = wallet_balance
-                        # Add to total balance regardless of wallet type
-                        total_balance += wallet_balance
+                    # Sum up all wallet balances
+                    total_balance = sum(float(wallet.get('balance', 0)) for wallet in wallets)
                 else:
                     # Fallback to legacy format if no wallets field
                     total_balance = float(asset_data.get('balance', 0))
+                
                 # Update total balance
                 self.balances[asset_code] = total_balance
+                
                 # Add to tracking set if non-zero balance and not USD
                 if total_balance > 0 and asset_code != 'USD':
-                    assets_with_balance.add(asset_code)
-            # Now check all known balances for non-zero amounts
-            # This ensures we don't lose tracking of assets not included in this update
-            for asset_code, balance in self.balances.items():
-                if balance > 0 and asset_code != 'USD':
                     assets_with_balance.add(asset_code)
             # Convert assets to trading pairs
             new_trading_pairs = {f"{asset}/USD" for asset in assets_with_balance}
@@ -1024,8 +1031,8 @@ class KrakenWebSocketClient:
             if total_balance <= 0:
                 return 0.0
 
-            if asset == "INJ":
-                Logger.info(f"DEBUG {asset}: Total balance: {total_balance}")
+            #if asset == "INJ":
+                #Logger.info(f"DEBUG {asset}: Total balance: {total_balance}")
             
             # Calculate amount in open sell orders
             amount_in_orders = 0.0
@@ -1039,14 +1046,14 @@ class KrakenWebSocketClient:
 
             amount_in_earn = self.earn_balances.get(asset, 0.0)
             
-            if asset == "INJ":
-                Logger.info(f"DEBUG {asset}: Amount in orders: {amount_in_orders}, Amount in earn: {amount_in_earn}")
+            #if asset == "INJ":
+                #Logger.info(f"DEBUG {asset}: Amount in orders: {amount_in_orders}, Amount in earn: {amount_in_earn}")
             
             # Calculate available balance
             available_balance = total_balance - amount_in_orders - amount_in_earn
             
-            if asset == "INJ":
-                Logger.info(f"DEBUG {asset}: Final available balance: {available_balance}")
+            #if asset == "INJ":
+                #Logger.info(f"DEBUG {asset}: Final available balance: {available_balance}")
             
             return max(0.0, available_balance)
         except Exception as e:
@@ -1168,8 +1175,7 @@ class KrakenGridBot:
         # Only check if this is a configured trading pair
         if trading_pair not in TRADING_PAIRS:
             return
-        # Check and log available spot balance
-        available_balance = await self.client.get_available_spot_balance(asset)
+
         # Filter orders for the specified trading pair that are open
         open_orders = [
             order for order in self.client.orders.values()
@@ -1178,57 +1184,58 @@ class KrakenGridBot:
                 order.get('order_status') in ['new', 'partially_filled'] and
                 order.get('order_id'))
         ]
-        if open_orders:
-            # Only check earn opportunities if the asset is eligible
-            if asset in self.client.earn_strategies:
-                strategy = self.client.earn_strategies[asset]
-                # Get minimum allocation from strategy
-                min_allocation = float(strategy['min_allocation'])
-                # Get current price from ticker data
-                ticker = self.client.ticker_data.get(trading_pair)
-                if ticker and ticker.get('last'):
-                    current_price = float(ticker['last'])
-                    # Calculate USD value of available balance
-                    available_balance_usd = available_balance * current_price
-                    if strategy.get('can_allocate') and available_balance_usd >= min_allocation:
-                        Logger.info(f"Found stakeable {asset} balance: {available_balance:.8f} {asset} (${available_balance_usd:.2f}, min: ${min_allocation:.2f})")
-                        # Format amount to match asset precision
-                        formatted_amount = f"{available_balance:.8f}".rstrip('0').rstrip('.')
-                        # Prepare allocation request
-                        nonce = str(int(time.time() * 1000))
-                        path = "/0/private/Earn/Allocate"
-                        post_data = {
-                            "nonce": nonce,
-                            "strategy_id": strategy['id'],
-                            "amount": formatted_amount
-                        }
-                        url = self.client.rest_url + path
-                        headers = {
-                            "API-Key": self.client.api_key,
-                            "API-Sign": self.client.get_kraken_signature(path, post_data)
-                        }                        
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.post(url, headers=headers, data=post_data) as response:
-                                    result = await response.json()                                    
-                                    if result.get('error'):
-                                        Logger.error(f"Error allocating {asset} to earn: {result['error']}")
-                                    else:
-                                        Logger.success(f"EARN: 200 - OK")
-                        except Exception as e:
-                            Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
-        else:
-            await self.place_orders(trading_pair)
-            return None
-        # If multiple buy orders exist (shouldn't happen), keep most recent
+
+        if not open_orders:
+            # No open orders - attempt to place new orders
+            orders_placed = await self.place_orders(trading_pair)
+            if not orders_placed:  # Only return if orders weren't successfully placed
+                return None
+        
+        # Check for staking opportunities only if we have both buy and sell orders
+        # or if we have existing open orders
+        if open_orders and asset in self.client.earn_strategies: #and asset not in ['ETH', 'SOL'] 
+            available_balance = await self.client.get_available_spot_balance(asset)
+            strategy = self.client.earn_strategies[asset]
+            min_allocation = float(strategy['min_allocation'])
+            ticker = self.client.ticker_data.get(trading_pair)
+            
+            if ticker and ticker.get('last'):
+                current_price = float(ticker['last'])
+                available_balance_usd = available_balance * current_price
+                
+                if strategy.get('can_allocate') and available_balance_usd >= min_allocation:
+                    formatted_amount = f"{available_balance:.8f}".rstrip('0').rstrip('.')
+                    nonce = str(int(time.time() * 1000))
+                    path = "/0/private/Earn/Allocate"
+                    post_data = {
+                        "nonce": nonce,
+                        "strategy_id": strategy['id'],
+                        "amount": formatted_amount
+                    }
+                    url = self.client.rest_url + path
+                    headers = {
+                        "API-Key": self.client.api_key,
+                        "API-Sign": self.client.get_kraken_signature(path, post_data)
+                    }                        
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(url, headers=headers, data=post_data) as response:
+                                result = await response.json()                                    
+                                if result.get('error'):
+                                    Logger.error(f"Error allocating {asset} to earn: {result['error']}")
+                                else:
+                                    Logger.success(f"EARN: 200 - OK")
+                    except Exception as e:
+                        Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
+
+        # Handle multiple buy orders if they exist
         if len(open_orders) > 1:
             Logger.warning(f"ORDER: TOO MANY {trading_pair} ORDERS")
             kept_order = sorted(open_orders, key=lambda x: x.get('time', 0), reverse=True)[0]
             for order in open_orders:
                 if order['order_id'] != kept_order['order_id']:
                     await self.cancel_order(order['order_id'])
-            return kept_order
-        # Return the single buy order
+
         return open_orders[0] if open_orders else None
     """
     Verifies if an open order is within acceptable grid interval.
@@ -1346,31 +1353,36 @@ class KrakenGridBot:
         current_time = time.time()
         last_order_time = self.grid_settings[trading_pair]['last_order_time']
         if current_time - last_order_time < GRID_DECAY_TIME:
-            time_left = GRID_DECAY_TIME - (current_time - last_order_time)
             return  
+
+        # Get current market data
         ticker = self.client.ticker_data.get(trading_pair)
         if not ticker or 'last' not in ticker:
             Logger.error(f"No ticker data available for {trading_pair}")
             return
+
         # Update last order time before placing orders
         self.grid_settings[trading_pair]['last_order_time'] = current_time
         current_price = float(ticker['last'])
         grid_interval = self.grid_settings[trading_pair]['grid_interval']
+
         # Get buy amount from TRADING_PAIRS
         buy_amount = TRADING_PAIRS[trading_pair]['size']
         # Calculate optimal sell amount
         sell_amount = buy_amount * TRADING_PAIRS[trading_pair]['sell_multiplier']
+
         # Calculate grid prices
         interval_amount = current_price * (grid_interval / 100)
         buy_price = current_price - interval_amount
         sell_price = current_price + interval_amount
+
         # Format prices using the precision from TRADING_PAIRS configuration
         buy_price = self.format_price_for_pair(trading_pair, buy_price)
-        sell_price = self.format_price_for_pair(trading_pair, sell_price) 
+        sell_price = self.format_price_for_pair(trading_pair, sell_price)
+
         try:
-            # Generate request ID for buy order
+            # Place buy order first
             buy_req_id = int(time.time() * 1000)
-            # Place buy order with correct buy_size
             buy_order_msg = {
                 "method": "add_order",
                 "params": {
@@ -1383,25 +1395,36 @@ class KrakenGridBot:
                 },
                 "req_id": buy_req_id
             }
-            try:
-                await self.client.websocket.send(json.dumps(buy_order_msg))
-                buy_response = await self.client.wait_for_response(buy_req_id)
-                if not buy_response:
-                    Logger.error(f"No response received for buy order on {trading_pair}")
-                    return    
-                if not buy_response.get('success'):
-                    error_msg = buy_response.get('error', 'Unknown error')
-                    Logger.error(f"Buy order failed for {trading_pair}: {error_msg}")
-                    return   
-                order_id = buy_response.get('result', {}).get('order_id')
-                if not order_id:
-                    Logger.error(f"No order ID received for {trading_pair}")
-                    return    
-                self.grid_settings[trading_pair]['active_orders'].add(order_id)
-                self.grid_orders[trading_pair]['buy'] = order_id
-                Logger.success(f"ORDER: {trading_pair} ID: {order_id}")
-                # Try to place corresponding sell order
-                try:
+
+            await self.client.websocket.send(json.dumps(buy_order_msg))
+            buy_response = await self.client.wait_for_response(buy_req_id)
+            
+            if not buy_response or not buy_response.get('success'):
+                error_msg = buy_response.get('error', 'Unknown error') if buy_response else 'No response'
+                Logger.error(f"Buy order failed for {trading_pair}: {error_msg}")
+                return False
+
+            buy_order_id = buy_response.get('result', {}).get('order_id')
+            if not buy_order_id:
+                Logger.error(f"No order ID received for {trading_pair}")
+                return False
+
+            self.grid_settings[trading_pair]['active_orders'].add(buy_order_id)
+            self.grid_orders[trading_pair]['buy'] = buy_order_id
+            Logger.success(f"ORDER: {trading_pair} ID: {buy_order_id}")
+
+            # Wait for balance update and retry sell order if needed
+            asset = trading_pair.split('/')[0]
+            max_retries = 3
+            retry_delay = 2
+
+            for attempt in range(max_retries):
+                await asyncio.sleep(retry_delay)
+                
+                # Check current available balance
+                available_balance = await self.client.get_available_spot_balance(asset)
+                
+                if available_balance >= sell_amount:
                     sell_req_id = int(time.time() * 1000)
                     sell_order_msg = {
                         "method": "add_order",
@@ -1415,25 +1438,31 @@ class KrakenGridBot:
                         },
                         "req_id": sell_req_id
                     }
+
                     await self.client.websocket.send(json.dumps(sell_order_msg))
                     sell_response = await self.client.wait_for_response(sell_req_id)
+                    
                     if sell_response and sell_response.get('success'):
                         sell_order_id = sell_response.get('result', {}).get('order_id')
                         if sell_order_id:
                             self.grid_orders[trading_pair]['sell'] = sell_order_id
                             Logger.success(f"ORDER: {trading_pair} ID: {sell_order_id}")
+                            return True
                         else:
-                            Logger.warning(f"ORDER: Sell order placed but no ID received for {trading_pair}")
+                            Logger.warning(f"No sell order ID received for {trading_pair}")
                     else:
-                        pass
-                except Exception as sell_error:
-                    Logger.error(f"Error placing sell order for {trading_pair}: {str(sell_error)}")
-            except Exception as send_error:
-                Logger.error(f"Error sending buy order for {trading_pair}: {str(send_error)}")
+                        error_msg = sell_response.get('error', 'Unknown error') if sell_response else 'No response'
+                        Logger.warning(f"Sell order attempt {attempt + 1} failed: {error_msg}")
+                else:
+                    Logger.warning(f"Insufficient balance for sell order, attempt {attempt + 1}. Available: {available_balance}, Required: {sell_amount}")
+
+            Logger.error(f"Failed to place sell order after {max_retries} attempts for {trading_pair}")
+            return False
+
         except Exception as e:
             Logger.error(f"Critical error placing orders for {trading_pair}: {str(e)}")
-            # Reset the decay timer on error
             self.grid_settings[trading_pair]['last_order_time'] = 0
+            return False
 
 async def main():
     """Main function to establish WebSocket connection and manage subscriptions."""
@@ -1444,29 +1473,36 @@ async def main():
     retry_count = 0
     while True:
         try:
-            # Attempt the WebSocket connection
             token = await client.connect()
             if not token:
                 raise Exception("Failed to obtain connection token")
+            
             # Set up WebSocket handlers
-            client.set_handler('balances', client.handle_balance_updates)
-            client.set_handler('executions', client.handle_execution_updates)
+            client.set_handler('executions', client.handle_execution_updates)  # Move executions first
             client.set_handler('ticker', client.handle_ticker)
-            # Subscribe to the channels we need
-            await client.subscribe(['balances', 'executions'], token)
-            # On successful connect/subscription, reset retry counter
+            client.set_handler('balances', client.handle_balance_updates)  # Move balances last
+            
+            # Subscribe to channels in specific order
+            await client.subscribe(['executions'], token)  # Subscribe to executions first
+            await asyncio.sleep(SHORT_SLEEP_TIME)  # Add small delay between subscriptions
+            await client.subscribe(['balances'], token)  # Subscribe to balances after
+            
             retry_count = 0
-            # Start the grid bot
             await grid_bot.start()
+            
             # Main trading loop
             while client.running:
                 try:
+                    # Wait briefly for initial order data to populate
+                    await asyncio.sleep(SHORT_SLEEP_TIME)
+                    
                     all_orders_valid = True
                     for pair in TRADING_PAIRS:
                         current_order = await grid_bot.check_open_orders(pair)
                         if current_order:
                             order_valid = await grid_bot.check_open_orders_open_order_interval(pair, current_order)
                             all_orders_valid = all_orders_valid and order_valid
+                    
                     if all_orders_valid:
                         Logger.success("ORDERS: 200 - OK")
                     await asyncio.sleep(LONG_SLEEP_TIME)
