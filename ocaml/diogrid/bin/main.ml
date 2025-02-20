@@ -162,8 +162,6 @@ let debug_log msg =
   then Lwt_io.printf "%s\n" msg
   else Lwt.return_unit
 
-
-(* Update public subscribe/unsubscribe messages *)
 let instrument_subscribe_message () =
   Yojson.Safe.to_string (`Assoc [
     "method", `String "subscribe";
@@ -249,8 +247,6 @@ let parse_instrument_data json =
     let* () = debug_log (Printf.sprintf "Error in parse_instrument_data: %s" (Exn.to_string e)) in
     Lwt.return []
 
-
-(* Add order parsing functions *)
 let parse_order_side = function
   | "buy" -> Buy
   | "sell" -> Sell
@@ -296,9 +292,6 @@ let log_open_orders () =
     debug_log (format_order_log order "ACTIVE")
   ) orders
 
-
-
-(* Add a temporary cache for pending orders *)
 let pending_orders : (string, order) Hashtbl.t = Hashtbl.create (module String)
 
 let parse_execution_message json =
@@ -471,7 +464,6 @@ let parse_execution_message json =
     (fun e ->
       debug_log (Printf.sprintf "[PRIVATE] Error parsing execution: %s" (Exn.to_string e)))
 
-(* Add private WebSocket message constructors *)
 let private_subscribe_message token =
   Yojson.Safe.to_string (`Assoc [
     "method", `String "subscribe";
@@ -488,8 +480,6 @@ let getprice_precision symbol =
   | Some details -> details.price_precision
   | None -> 2
 
-
-(* Add message handling types *)
 type amend_response = {
   success: bool;
   error: string option;
@@ -1041,7 +1031,7 @@ let main () =
           printf "[PRIVATE] WebSocket Token obtained: %s (expires in %d seconds)\n" 
             ws_token.token ws_token.expires;
           
-          (* Create both private and amend connections *)
+          (* Create both private and order connections *)
           let* private_conn = connect_private ws_token.token 3 in
           let* amend_conn = connect_dedicated_order_connection ws_token.token 3 in
           
