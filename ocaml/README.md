@@ -32,8 +32,8 @@ Edit the `tracked_pairs` list in `diogrid/bin/main.ml` to configure your trading
 
 ```ocaml
 let tracked_pairs = [
-  ("BTC/USD", 0.75, 0.000875, 0.99);  (* Symbol, Grid Interval %, Order Quantity, Sell Multiplier *)
-  ("ETH/USD", 3.0, 0.0045, 0.99);
+  ("BTC/USD", 0.75, 0.000875, 0.99, 1);  (* Symbol, Grid Interval %, Order Quantity, Sell Multiplier, Price Precision *)
+  ("ETH/USD", 3.0, 0.0045, 0.99, 2);
   // Add more pairs as needed...
 ]
 ```
@@ -43,7 +43,7 @@ Each tuple contains:
 - Grid interval percentage (determines price spread)
 - Order quantity (base currency amount)
 - Sell multiplier (typically 0.99 for 1% less than buy quantity)
-
+- Price precision (number of decimal places for price)
 ### 3. Build and Run
 
 ```bash

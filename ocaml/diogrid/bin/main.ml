@@ -12,15 +12,15 @@ module B = Bytes
 TRADING CONFIGURATION
 =====================*)
 let tracked_pairs = [
-  ("BTC/USD", 0.75, 0.000875, 0.99);
-  ("ETH/USD", 3.0, 0.0045, 0.99);
-  ("XRP/USD", 3.0, 5.0, 0.99);
-  ("SOL/USD", 2.5, 0.06, 0.99);
-  ("ADA/USD", 3.0, 18.0, 0.99);
-  ("TRX/USD", 3.0, 55.0, 0.99);
-  ("DOT/USD", 3.0, 2.5, 0.99);
-  ("INJ/USD", 3.0, 0.81, 0.99);
-  ("KSM/USD", 3.0, 0.6, 0.99);
+  ("BTC/USD", 0.75, 0.000875, 0.99, 1);
+  ("ETH/USD", 3.0, 0.0045, 0.99, 2);
+  ("XRP/USD", 3.0, 5.0, 0.99, 5);
+  ("SOL/USD", 2.5, 0.06, 0.99, 2);
+  ("ADA/USD", 3.0, 18.0, 0.99, 6);
+  ("TRX/USD", 3.0, 55.0, 0.99, 6);
+  ("DOT/USD", 3.0, 2.5, 0.99, 4);
+  ("INJ/USD", 3.0, 0.81, 0.99, 3);
+  ("KSM/USD", 3.0, 0.6, 0.99, 2);
 ]
 
 (*===========================
@@ -46,7 +46,7 @@ let get_api_credentials_from_env () =
 let base_url = "https://api.kraken.com"
 
 let get_nonce () =
-  Int64.to_string (Int64.of_float (Unix.gettimeofday () *. 1000.0))
+  Int64.to_string (Int64.of_float (Core_unix.gettimeofday () *. 1000.0))
 
 let bytes_concat bs =
   let total_len = List.fold ~init:0 ~f:(fun acc b -> acc + B.length b) bs in
@@ -188,7 +188,7 @@ let ticker_subscribe_message pairs =
     "method", `String "subscribe";
     "params", `Assoc [
       "channel", `String "ticker";
-      "symbol", `List (List.map ~f:(fun (p, _, _, _) -> `String p) pairs);
+      "symbol", `List (List.map ~f:(fun (p, _, _, _, _) -> `String p) pairs);
     ];
     "req_id", `Int 3
   ])
@@ -232,7 +232,7 @@ let parse_instrument_data json =
     let* filtered_pairs = Lwt_list.filter_map_s (fun pair_json ->
       try 
         let symbol = safe_string pair_json "symbol" "" in
-        if List.exists ~f:(fun (pair, _, _, _) -> String.equal pair symbol) tracked_pairs then
+        if List.exists ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) tracked_pairs then
           let details = {
             _symbol = symbol;
             price_precision = safe_int pair_json "price_precision" 2;
@@ -371,7 +371,7 @@ let parse_execution_message json =
                   
                   (* Rest of the existing processing for non-terminal states *)
                   match side with
-                  | Buy when List.exists tracked_pairs ~f:(fun (pair, _, _, _) -> 
+                  | Buy when List.exists tracked_pairs ~f:(fun (pair, _, _, _, _) -> 
                       String.equal pair symbol) ->
                     let status_str = safe_string order_json "order_status" "" in
                     let status = parse_order_status status_str in
@@ -589,15 +589,15 @@ let rec connect_dedicated_order_connection token retries =
         let* () = Lwt_unix.sleep 2.0 in
         connect_dedicated_order_connection token (retries - 1))
 
-let round_to_precision price precision =
-  let factor = Float.(10. ** of_int precision) in
-  Float.round (price *. factor) /. factor
+let round_to_precision value precision =
+  let factor = 10.0 ** (Float.of_int precision) in
+  Float.round (value *. factor) /. factor
 
 let amend_order amend_conn symbol order_id current_price grid_interval price_precision =
   (* Find the order quantity from tracked pairs *)
   let order_qty =
-    match List.find tracked_pairs ~f:(fun (pair, _, _, _) -> String.equal pair symbol) with
-    | Some (_, _, qty, _) -> qty
+    match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
+    | Some (_, _, qty, _, _) -> qty
     | None -> raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
   in
 
@@ -659,122 +659,127 @@ let amend_order amend_conn symbol order_id current_price grid_interval price_pre
 
 let place_orders amend_conn symbol current_price =
   (* Get the configuration parameters for this symbol *)
-  let (_, grid_interval, order_qty, sell_multiplier) = 
-    match List.find tracked_pairs ~f:(fun (pair, _, _, _) -> String.equal pair symbol) with
+  let (_, grid_interval, order_qty, sell_multiplier, price_precision) = 
+    match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
     | Some params -> params
     | None -> 
         raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
   in
   
-  (* Get price precision for this symbol *)
-  let price_precision = 
-    match List.find !instrument_details ~f:(fun d -> String.equal d._symbol symbol) with
-    | Some details -> details.price_precision
-    | None -> 2 (* fallback default *)
+  (* Check if we already have a pending sell order *)
+  let existing_sell_order = 
+    Hashtbl.to_alist open_buy_orders
+    |> List.find ~f:(fun (_, order) -> String.equal order.order_symbol symbol)
   in
   
-  let sell_qty = order_qty *. sell_multiplier in
-  
-  (* Calculate and round limit prices to correct precision *)
-  let sell_limit_price = 
-    round_to_precision
-      (current_price *. (1.0 +. (grid_interval /. 100.0)))
-      price_precision in
-  let buy_limit_price = 
-    round_to_precision
-      (current_price *. (1.0 -. (grid_interval /. 100.0)))
-      price_precision in
-  
-  (* Create sell order request *)
-  let sell_req_id = Random.int 10000 + 1 in
-  let sell_request = `Assoc [
-    "method", `String "add_order";
-    "params", `Assoc [
-      "symbol", `String symbol;
-      "side", `String "sell";
-      "order_type", `String "limit";
-      "limit_price", `Float sell_limit_price;
-      "order_qty", `Float sell_qty;
-      "time_in_force", `String "gtc";
-      "post_only", `Bool true;
-      "token", `String amend_conn.token;
-    ];
-    "req_id", `Int sell_req_id;
-  ] in
+  match existing_sell_order with
+  | Some _ -> 
+      (* Already have a sell order, don't place another one *)
+      let* () = debug_log (Printf.sprintf "[ORDER PLACE] Skipping %s - sell order already exists" symbol) in
+      Lwt.return_unit
+  | None ->
+      let sell_qty = order_qty *. sell_multiplier in
+      
+      (* Use price_precision from tracked_pairs *)
+      let sell_limit_price = 
+        round_to_precision
+          (current_price *. (1.0 +. (grid_interval /. 100.0)))
+          price_precision in
+      let buy_limit_price = 
+        round_to_precision
+          (current_price *. (1.0 -. (grid_interval /. 100.0)))
+          price_precision in
+      
+      (* Create sell order request *)
+      let sell_req_id = Random.int 10000 + 1 in
+      let sell_request = `Assoc [
+        "method", `String "add_order";
+        "params", `Assoc [
+          "symbol", `String symbol;
+          "side", `String "sell";
+          "order_type", `String "limit";
+          "limit_price", `Float sell_limit_price;
+          "order_qty", `Float sell_qty;
+          "time_in_force", `String "gtc";
+          "post_only", `Bool true;
+          "token", `String amend_conn.token;
+        ];
+        "req_id", `Int sell_req_id;
+      ] in
 
-  (* Create promise for sell order response *)
-  let sell_promise, sell_resolver = Lwt.wait () in
-  Hashtbl.set amend_conn.response_promises ~key:sell_req_id ~data:sell_resolver;
-  
-  (* Send sell order and wait for response *)
-  let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.8f" 
-    symbol sell_qty sell_limit_price) in
-  let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
-  let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
-  
-  (* Wait for sell order response *)
-  let* sell_response = Lwt.pick [
-    sell_promise;
-    (let* () = Lwt_unix.sleep 5.0 in
-     Hashtbl.remove amend_conn.response_promises sell_req_id;
-     Lwt.return { success = false; error = Some "Timeout"; result = None })
-  ] in
-  
-  (* Log sell order response *)
-  let* () = match sell_response with
-    | { success = true; result = Some result; _ } ->
-        let order_id = safe_string result "order_id" "unknown" in
-        debug_log (Printf.sprintf "[ORDER PLACE] SELL order placed successfully: %s" order_id)
-    | { error = Some err; _ } ->
-        debug_log (Printf.sprintf "[ORDER PLACE] SELL order failed: %s" err)
-    | _ ->
-        debug_log "[ORDER PLACE] SELL order failed with unknown error"
-  in
-  
-  (* Create buy order request *)
-  let buy_req_id = Random.int 10000 + 1 in
-  let buy_request = `Assoc [
-    "method", `String "add_order";
-    "params", `Assoc [
-      "symbol", `String symbol;
-      "side", `String "buy";
-      "order_type", `String "limit";
-      "limit_price", `Float buy_limit_price;
-      "order_qty", `Float order_qty;
-      "time_in_force", `String "gtc";
-      "post_only", `Bool true;
-      "token", `String amend_conn.token;
-    ];
-    "req_id", `Int buy_req_id;
-  ] in
-  
-  (* Create promise for buy order response *)
-  let buy_promise, buy_resolver = Lwt.wait () in
-  Hashtbl.set amend_conn.response_promises ~key:buy_req_id ~data:buy_resolver;
-  
-  (* Send buy order and wait for response *)
-  let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.8f" 
-    symbol order_qty buy_limit_price) in
-  let buy_frame = Frame.create ~content:(Yojson.Safe.to_string buy_request) () in
-  let* () = Websocket_lwt_unix.write amend_conn.conn buy_frame in
-  
-  (* Wait for buy order response *)
-  let* buy_response = Lwt.pick [
-    buy_promise;
-    (let* () = Lwt_unix.sleep 5.0 in
-     Hashtbl.remove amend_conn.response_promises buy_req_id;
-     Lwt.return { success = false; error = Some "Timeout"; result = None })
-  ] in
-  
-  (* Log buy order response *)
-  match buy_response with
-  | { success = true; result = Some result; _ } ->
-      let order_id = safe_string result "order_id" "unknown" in
-      debug_log (Printf.sprintf "[ORDER PLACE] BUY order placed successfully: %s" order_id)
-  | { error = Some err; _ } ->
-      debug_log (Printf.sprintf "[ORDER PLACE] BUY order failed: %s" err)
-  | _ ->
-      debug_log "[ORDER PLACE] BUY order failed with unknown error"
+      (* Create promise for sell order response *)
+      let sell_promise, sell_resolver = Lwt.wait () in
+      Hashtbl.set amend_conn.response_promises ~key:sell_req_id ~data:sell_resolver;
+      
+      (* Send sell order and wait for response *)
+      let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.8f" 
+        symbol sell_qty sell_limit_price) in
+      let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
+      let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
+      
+      (* Wait for sell order response *)
+      let* sell_response = Lwt.pick [
+        sell_promise;
+        (let* () = Lwt_unix.sleep 5.0 in
+         Hashtbl.remove amend_conn.response_promises sell_req_id;
+         Lwt.return { success = false; error = Some "Timeout"; result = None })
+      ] in
+      
+      (* Log sell order response *)
+      let* () = match sell_response with
+        | { success = true; result = Some result; _ } ->
+            let order_id = safe_string result "order_id" "unknown" in
+            debug_log (Printf.sprintf "[ORDER PLACE] SELL order placed successfully: %s" order_id)
+        | { error = Some err; _ } ->
+            debug_log (Printf.sprintf "[ORDER PLACE] SELL order failed: %s" err)
+        | _ ->
+            debug_log "[ORDER PLACE] SELL order failed with unknown error"
+      in
+      
+      (* Create buy order request *)
+      let buy_req_id = Random.int 10000 + 1 in
+      let buy_request = `Assoc [
+        "method", `String "add_order";
+        "params", `Assoc [
+          "symbol", `String symbol;
+          "side", `String "buy";
+          "order_type", `String "limit";
+          "limit_price", `Float buy_limit_price;
+          "order_qty", `Float order_qty;
+          "time_in_force", `String "gtc";
+          "post_only", `Bool true;
+          "token", `String amend_conn.token;
+        ];
+        "req_id", `Int buy_req_id;
+      ] in
+      
+      (* Create promise for buy order response *)
+      let buy_promise, buy_resolver = Lwt.wait () in
+      Hashtbl.set amend_conn.response_promises ~key:buy_req_id ~data:buy_resolver;
+      
+      (* Send buy order and wait for response *)
+      let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.8f" 
+        symbol order_qty buy_limit_price) in
+      let buy_frame = Frame.create ~content:(Yojson.Safe.to_string buy_request) () in
+      let* () = Websocket_lwt_unix.write amend_conn.conn buy_frame in
+      
+      (* Wait for buy order response *)
+      let* buy_response = Lwt.pick [
+        buy_promise;
+        (let* () = Lwt_unix.sleep 5.0 in
+         Hashtbl.remove amend_conn.response_promises buy_req_id;
+         Lwt.return { success = false; error = Some "Timeout"; result = None })
+      ] in
+      
+      (* Log buy order response *)
+      match buy_response with
+      | { success = true; result = Some result; _ } ->
+          let order_id = safe_string result "order_id" "unknown" in
+          debug_log (Printf.sprintf "[ORDER PLACE] BUY order placed successfully: %s" order_id)
+      | { error = Some err; _ } ->
+          debug_log (Printf.sprintf "[ORDER PLACE] BUY order failed: %s" err)
+      | _ ->
+          debug_log "[ORDER PLACE] BUY order failed with unknown error"
 
 
 
@@ -788,8 +793,8 @@ let check_order_validity amend_conn symbol =
   in
 
   (* Find the grid interval for this symbol *)
-  let (_, grid_interval, _, _) = 
-    match List.find tracked_pairs ~f:(fun (pair, _, _, _) -> String.equal pair symbol) with
+  let (_, grid_interval, _, _, _) = 
+    match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
     | Some params -> params
     | None -> 
         raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
@@ -908,7 +913,7 @@ let rec read_frames public_conn private_conn amend_conn token =
                       symbol current_price) in
                     
                     (* Check if this symbol is in our tracked pairs *)
-                    let is_tracked = List.exists tracked_pairs ~f:(fun (pair, _, _, _) -> 
+                    let is_tracked = List.exists tracked_pairs ~f:(fun (pair, _, _, _, _) -> 
                       String.equal pair symbol) in
                     
                     if is_tracked then (
@@ -971,7 +976,7 @@ let rec read_frames public_conn private_conn amend_conn token =
       debug_log (Printf.sprintf "Error in read_frames: %s" (Exn.to_string e)) >>= fun () ->
       read_frames public_conn private_conn amend_conn token)
 
-let rec connect_public private_conn amend_conn token retries = 
+let rec connect_public private_conn amend_conn token retries =
   let* () = debug_log (Printf.sprintf "Attempting public connection (retries left: %d)" retries) in
   if retries <= 0 then 
     debug_log "Out of retries for public connection" >>= fun () ->
