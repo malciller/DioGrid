@@ -15,7 +15,7 @@ let tracked_pairs = [
   ("BTC/USD", 0.75, 0.000875, 0.99, 1);
   ("ETH/USD", 3.0, 0.0045, 0.99, 2);
   ("XRP/USD", 3.0, 5.0, 0.99, 5);
-  ("SOL/USD", 2.5, 0.06, 0.99, 2);
+  ("SOL/USD", 2.5, 0.07, 0.99, 2);
   ("ADA/USD", 3.0, 18.0, 0.99, 6);
   ("TRX/USD", 3.0, 55.0, 0.99, 6);
   ("DOT/USD", 3.0, 2.5, 0.99, 4);
@@ -33,7 +33,6 @@ type ws_token_info = {
 
 type instrument_details = {
   _symbol: string;
-  price_precision: int;
 }
 
 let instrument_details = ref []
@@ -158,7 +157,7 @@ let safe_bool json field default =
 
 let debug_log msg =
   if String.is_prefix msg ~prefix:"[ORDER" ||
-     String.is_prefix msg ~prefix:"[AMEND]" 
+     String.is_prefix msg ~prefix:"[PRICE CHECK]" 
   then Lwt_io.printf "%s\n" msg
   else Lwt.return_unit
 
@@ -235,7 +234,6 @@ let parse_instrument_data json =
         if List.exists ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) tracked_pairs then
           let details = {
             _symbol = symbol;
-            price_precision = safe_int pair_json "price_precision" 2;
           } in
           instrument_details := details :: !instrument_details;
           Lwt.return (Some details)
@@ -484,9 +482,14 @@ let private_subscribe_message token =
 
 
 let getprice_precision symbol =
-  match List.find !instrument_details ~f:(fun d -> String.equal d._symbol symbol) with
-  | Some details -> details.price_precision
-  | None -> 2
+  match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
+  | Some (_, _, _, _, precision) -> precision
+  | None -> 2  (* Default fallback, though this shouldn't happen for tracked pairs *)
+
+let round_to_precision value precision =
+  let factor = 10.0 ** Float.of_int precision in
+  Float.round_down (value *. factor) /. factor
+
 
 
 (* Add message handling types *)
@@ -589,9 +592,7 @@ let rec connect_dedicated_order_connection token retries =
         let* () = Lwt_unix.sleep 2.0 in
         connect_dedicated_order_connection token (retries - 1))
 
-let round_to_precision value precision =
-  let factor = 10.0 ** (Float.of_int precision) in
-  Float.round (value *. factor) /. factor
+
 
 let amend_order amend_conn symbol order_id current_price grid_interval price_precision =
   (* Find the order quantity from tracked pairs *)
@@ -684,12 +685,18 @@ let place_orders amend_conn symbol current_price =
       let sell_limit_price = 
         round_to_precision
           (current_price *. (1.0 +. (grid_interval /. 100.0)))
-          price_precision in
+          price_precision
+      in
       let buy_limit_price = 
         round_to_precision
           (current_price *. (1.0 -. (grid_interval /. 100.0)))
-          price_precision in
-      
+          price_precision 
+      in
+
+      let* () = debug_log (Printf.sprintf "[PRICE CHECK] %s: Final limit price: %.8f" 
+        symbol sell_limit_price) in
+
+
       (* Create sell order request *)
       let sell_req_id = Random.int 10000 + 1 in
       let sell_request = `Assoc [
