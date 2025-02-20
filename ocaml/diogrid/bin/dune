@@ -1,0 +1,11 @@
+(executable
+ (name main)
+ (libraries 
+   core 
+   cohttp-lwt-unix 
+   lwt 
+   yojson 
+   websocket-lwt-unix 
+   digestif 
+   base64 
+   dotenv))
