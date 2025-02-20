@@ -26,13 +26,13 @@ TRADING_PAIRS = {
     }
     for pair, (size, grid, trail, precision, sell_multiplier) in {
         "BTC/USD": (0.000875, 0.75, 0.75, 1, 0.999), # $87.50 @ 3.5x (0.00025 @ 1.0x @ $100k)
-        "SOL/USD": (0.06, 2.5, 2.5, 2, 0.999), # 13-16%   
+        "SOL/USD": (0.06, 2.5, 2.5, 2, 0.999), # 13-16%    # need to unstake 0.1199636 and append to top sell order
         "XRP/USD": (5.0, 3.0, 3.0, 5, 0.999), # 0%          
         "ADA/USD": (18.0, 3.0, 3.0, 6, 0.999), # 2-5% 
         "ETH/USD": (0.0045, 3.0, 3.0, 2, 0.999), # 2-7%   
         "TRX/USD": (55.0, 3.0, 3.0, 6, 0.999), # 4-7%      
         "DOT/USD": (2.5, 3.0, 3.0, 4, 0.999), # 12-18% 
-        "INJ/USD": (0.81, 3.0, 3.0, 3, 0.999), # 7-11%
+        "INJ/USD": (0.81, 3.0, 3.0, 3, 0.999), # 7-11% pair appear broken on kraken end, balance doesn't update
         "KSM/USD": (0.6, 3.0, 3.0, 2, 0.999), # 16-24% 
     }.items()
 }
@@ -132,7 +132,7 @@ class KrakenWebSocketClient:
         self.jitter = 0.1           # Add 10% random jitter
         self.earn_strategies = {}
         self.strategy_ids = {}
-        self._public_ping_lock = asyncio.Lock()
+        self. _public_ping_lock = asyncio.Lock()
     """
     Generates a Kraken API signature for authentication.
     
@@ -410,21 +410,23 @@ class KrakenWebSocketClient:
             self.message_task = None
             self.public_message_task = None
 
-            # Close existing connections gracefully
-            if self.websocket:
+            # Close existing connections if they exist
+            if hasattr(self.websocket, 'close') and self.websocket:
                 try:
                     await self.websocket.close()
                 except Exception as e:
                     Logger.warning(f"Error closing private connection: {str(e)}")
-                self.websocket = None
             
-            if self.public_websocket:
+            if hasattr(self.public_websocket, 'close') and self.public_websocket:
                 try:
                     await self.public_websocket.close()
                 except Exception as e:
                     Logger.warning(f"Error closing public connection: {str(e)}")
-                self.public_websocket = None
 
+            # Reset websocket objects
+            self.websocket = None
+            self.public_websocket = None
+            
             # Reset connection status
             self.connection_status['private']['connected'] = False
             self.connection_status['public']['connected'] = False
@@ -1191,9 +1193,11 @@ class KrakenGridBot:
             if not orders_placed:  # Only return if orders weren't successfully placed
                 return None
         
+        # Commenting out staking check and action
+        '''
         # Check for staking opportunities only if we have both buy and sell orders
         # or if we have existing open orders
-        if open_orders and asset in self.client.earn_strategies: #and asset not in ['ETH', 'SOL'] 
+        if open_orders and asset in self.client.earn_strategies and asset not in ['ETH', 'SOL']: 
             available_balance = await self.client.get_available_spot_balance(asset)
             strategy = self.client.earn_strategies[asset]
             min_allocation = float(strategy['min_allocation'])
@@ -1227,6 +1231,7 @@ class KrakenGridBot:
                                     Logger.success(f"EARN: 200 - OK")
                     except Exception as e:
                         Logger.error(f"Error during earn allocation for {asset}: {str(e)}")
+        '''
 
         # Handle multiple buy orders if they exist
         if len(open_orders) > 1:

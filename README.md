@@ -1,4 +1,7 @@
 # DioGrid
+## OCaml Version
+Found in the `ocaml` directory.
+
 Follow DioGrid's Performance: https://portfolio.diophantsolutions.com
 
 Read the technical paper: https://portfolio.diophantsolutions.com/diogrid-wp
