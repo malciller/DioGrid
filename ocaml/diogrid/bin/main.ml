@@ -12,15 +12,15 @@ module B = Bytes
 TRADING CONFIGURATION
 =====================*)
 let tracked_pairs = [
-  ("BTC/USD", 0.75, 0.000875, 0.99, 1);
-  ("ETH/USD", 3.0, 0.0045, 0.99, 2);
-  ("XRP/USD", 3.0, 5.0, 0.99, 5);
-  ("SOL/USD", 2.5, 0.07, 0.99, 2);
-  ("ADA/USD", 3.0, 18.0, 0.99, 6);
-  ("TRX/USD", 3.0, 55.0, 0.99, 6);
-  ("DOT/USD", 3.0, 2.5, 0.99, 4);
-  ("INJ/USD", 3.0, 0.81, 0.99, 3);
-  ("KSM/USD", 3.0, 0.6, 0.99, 2);
+  ("BTC/USD", 0.75, 0.000875, 0.999, 1);
+  ("ETH/USD", 3.0, 0.0045, 0.999, 2);
+  ("XRP/USD", 3.0, 5.0, 0.999, 5);
+  ("SOL/USD", 2.5, 0.07, 0.999, 2);
+  ("ADA/USD", 3.0, 18.0, 0.999, 6);
+  ("TRX/USD", 3.0, 55.0, 0.999, 6);
+  ("DOT/USD", 3.0, 2.5, 0.999, 4);
+  ("INJ/USD", 3.0, 0.81, 0.999, 3);
+  ("KSM/USD", 3.0, 0.6, 0.999, 2);
 ]
 
 (*===========================
@@ -644,151 +644,176 @@ let amend_order amend_conn symbol order_id current_price grid_interval price_pre
   ] in
   
   (* Process response *)
-  if response.success then
-    match response.result with
-    | Some result ->
-        let amend_id = safe_string result "amend_id" "unknown" in
-        let amended_order_id = safe_string result "order_id" order_id in
-        debug_log (Printf.sprintf "[AMEND] Success - amend_id: %s, order_id: %s" 
-          amend_id amended_order_id)
-    | None ->
-        debug_log "[AMEND] Success but no result data"
+  match response with
+  | { success = true; result = Some result; error = None } ->
+      let amend_id = safe_string result "amend_id" "unknown" in
+      let amended_order_id = safe_string result "order_id" order_id in
+      debug_log (Printf.sprintf "[AMEND] Success - amend_id: %s, order_id: %s, new price: %.8f" 
+        amend_id amended_order_id new_limit_price)
+  | { success = true; result = Some result; error = Some error_msg } ->
+      let amend_id = safe_string result "amend_id" "unknown" in
+      let amended_order_id = safe_string result "order_id" order_id in
+      debug_log (Printf.sprintf "[AMEND] Partial success - amend_id: %s, order_id: %s, error: %s" 
+        amend_id amended_order_id error_msg)
+  | { success = true; result = None; error = Some error_msg } ->
+      debug_log (Printf.sprintf "[AMEND] Success with error - order_id: %s, error: %s" 
+        order_id error_msg)
+  | { success = true; result = None; error = None } ->
+      debug_log (Printf.sprintf "[AMEND] Success but no details - order_id: %s" order_id)
+  | { success = false; error = Some error_msg; _ } ->
+      debug_log (Printf.sprintf "[AMEND] Failed - order_id: %s, error: %s" 
+        order_id error_msg)
+  | { success = false; error = None; _ } ->
+      debug_log (Printf.sprintf "[AMEND] Failed with no error message - order_id: %s" 
+        order_id)
+
+let rec place_orders_with_retry amend_conn symbol current_price retries =
+  if retries <= 0 then
+    debug_log (Printf.sprintf "[ORDER PLACE] Out of retries placing orders for %s" symbol)
   else
-    debug_log (Printf.sprintf "[AMEND] Failed - %s" 
-      (Option.value response.error ~default:"Unknown error"))
+    (* Get the configuration parameters for this symbol *)
+    let (_, grid_interval, order_qty, sell_multiplier, price_precision) = 
+      match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
+      | Some params -> params
+      | None -> 
+          raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
+    in
+    
+    (* Calculate order quantities and prices *)
+    let sell_qty = order_qty *. sell_multiplier in
+    let sell_limit_price = 
+      round_to_precision
+        (current_price *. (1.0 +. (grid_interval /. 100.0)))
+        price_precision
+    in
+    let buy_limit_price = 
+      round_to_precision
+        (current_price *. (1.0 -. (grid_interval /. 100.0)))
+        price_precision 
+    in
 
+    (* Create sell order request *)
+    let sell_req_id = Random.int 10000 + 1 in
+    let sell_request = `Assoc [
+      "method", `String "add_order";
+      "params", `Assoc [
+        "symbol", `String symbol;
+        "side", `String "sell";
+        "order_type", `String "limit";
+        "limit_price", `Float sell_limit_price;
+        "order_qty", `Float sell_qty;
+        "time_in_force", `String "gtc";
+        "post_only", `Bool true;
+        "token", `String amend_conn.token;
+      ];
+      "req_id", `Int sell_req_id;
+    ] in
 
-let place_orders amend_conn symbol current_price =
-  (* Get the configuration parameters for this symbol *)
-  let (_, grid_interval, order_qty, sell_multiplier, price_precision) = 
-    match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
-    | Some params -> params
-    | None -> 
-        raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
-  in
-  
-  (* Check if we already have a pending sell order *)
-  let existing_sell_order = 
-    Hashtbl.to_alist open_buy_orders
-    |> List.find ~f:(fun (_, order) -> String.equal order.order_symbol symbol)
-  in
-  
-  match existing_sell_order with
-  | Some _ -> 
-      (* Already have a sell order, don't place another one *)
-      let* () = debug_log (Printf.sprintf "[ORDER PLACE] Skipping %s - sell order already exists" symbol) in
-      Lwt.return_unit
-  | None ->
-      let sell_qty = order_qty *. sell_multiplier in
-      
-      (* Use price_precision from tracked_pairs *)
-      let sell_limit_price = 
-        round_to_precision
-          (current_price *. (1.0 +. (grid_interval /. 100.0)))
-          price_precision
-      in
-      let buy_limit_price = 
-        round_to_precision
-          (current_price *. (1.0 -. (grid_interval /. 100.0)))
-          price_precision 
-      in
-
-      let* () = debug_log (Printf.sprintf "[PRICE CHECK] %s: Final limit price: %.8f" 
-        symbol sell_limit_price) in
-
-
-      (* Create sell order request *)
-      let sell_req_id = Random.int 10000 + 1 in
-      let sell_request = `Assoc [
-        "method", `String "add_order";
-        "params", `Assoc [
-          "symbol", `String symbol;
-          "side", `String "sell";
-          "order_type", `String "limit";
-          "limit_price", `Float sell_limit_price;
-          "order_qty", `Float sell_qty;
-          "time_in_force", `String "gtc";
-          "post_only", `Bool true;
-          "token", `String amend_conn.token;
-        ];
-        "req_id", `Int sell_req_id;
-      ] in
-
-      (* Create promise for sell order response *)
-      let sell_promise, sell_resolver = Lwt.wait () in
-      Hashtbl.set amend_conn.response_promises ~key:sell_req_id ~data:sell_resolver;
-      
-      (* Send sell order and wait for response *)
-      let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.8f" 
-        symbol sell_qty sell_limit_price) in
-      let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
-      let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
-      
-      (* Wait for sell order response *)
-      let* sell_response = Lwt.pick [
-        sell_promise;
-        (let* () = Lwt_unix.sleep 5.0 in
-         Hashtbl.remove amend_conn.response_promises sell_req_id;
-         Lwt.return { success = false; error = Some "Timeout"; result = None })
-      ] in
-      
-      (* Log sell order response *)
-      let* () = match sell_response with
-        | { success = true; result = Some result; _ } ->
+    (* Create promise for sell order response with timeout *)
+    let sell_promise, sell_resolver = Lwt.wait () in
+    Hashtbl.set amend_conn.response_promises ~key:sell_req_id ~data:sell_resolver;
+    
+    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Attempt %d: Sending SELL order for %s: %.8f @ %.8f" 
+      (4 - retries) symbol sell_qty sell_limit_price) in
+    let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
+    
+    Lwt.catch
+      (fun () ->
+        let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
+        
+        (* Wait for sell order response with 10 second timeout *)
+        let* sell_response = Lwt.pick [
+          sell_promise;
+          (let* () = Lwt_unix.sleep 10.0 in
+           Hashtbl.remove amend_conn.response_promises sell_req_id;
+           Lwt.return { success = false; error = Some "Timeout waiting for sell order response"; result = None })
+        ] in
+        
+        (match sell_response with
+        | { success = true; result = Some result; error = None } ->
             let order_id = safe_string result "order_id" "unknown" in
-            debug_log (Printf.sprintf "[ORDER PLACE] SELL order placed successfully: %s" order_id)
-        | { error = Some err; _ } ->
-            debug_log (Printf.sprintf "[ORDER PLACE] SELL order failed: %s" err)
-        | _ ->
-            debug_log "[ORDER PLACE] SELL order failed with unknown error"
-      in
-      
-      (* Create buy order request *)
-      let buy_req_id = Random.int 10000 + 1 in
-      let buy_request = `Assoc [
-        "method", `String "add_order";
-        "params", `Assoc [
-          "symbol", `String symbol;
-          "side", `String "buy";
-          "order_type", `String "limit";
-          "limit_price", `Float buy_limit_price;
-          "order_qty", `Float order_qty;
-          "time_in_force", `String "gtc";
-          "post_only", `Bool true;
-          "token", `String amend_conn.token;
-        ];
-        "req_id", `Int buy_req_id;
-      ] in
-      
-      (* Create promise for buy order response *)
-      let buy_promise, buy_resolver = Lwt.wait () in
-      Hashtbl.set amend_conn.response_promises ~key:buy_req_id ~data:buy_resolver;
-      
-      (* Send buy order and wait for response *)
-      let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.8f" 
-        symbol order_qty buy_limit_price) in
-      let buy_frame = Frame.create ~content:(Yojson.Safe.to_string buy_request) () in
-      let* () = Websocket_lwt_unix.write amend_conn.conn buy_frame in
-      
-      (* Wait for buy order response *)
-      let* buy_response = Lwt.pick [
-        buy_promise;
-        (let* () = Lwt_unix.sleep 5.0 in
-         Hashtbl.remove amend_conn.response_promises buy_req_id;
-         Lwt.return { success = false; error = Some "Timeout"; result = None })
-      ] in
-      
-      (* Log buy order response *)
-      match buy_response with
-      | { success = true; result = Some result; _ } ->
-          let order_id = safe_string result "order_id" "unknown" in
-          debug_log (Printf.sprintf "[ORDER PLACE] BUY order placed successfully: %s" order_id)
-      | { error = Some err; _ } ->
-          debug_log (Printf.sprintf "[ORDER PLACE] BUY order failed: %s" err)
-      | _ ->
-          debug_log "[ORDER PLACE] BUY order failed with unknown error"
+            let* () = debug_log (Printf.sprintf "[ORDER PLACE] SELL order placed successfully: %s" order_id) in
+            Lwt.return_unit
+        | { success = true; result = Some result; error = Some error_msg } ->
+            let order_id = safe_string result "order_id" "unknown" in
+            let* () = debug_log (Printf.sprintf "[ORDER PLACE] SELL order placed with warnings: ID %s, Error: %s" 
+              order_id error_msg) in
+            Lwt.return_unit
+        | { success = true; result = None; error = Some error_msg } ->
+            let* () = debug_log (Printf.sprintf "[ORDER PLACE] SELL order successful but with error: %s" error_msg) in
+            Lwt.return_unit
+        | { success = true; result = None; error = None } ->
+            let* () = debug_log "[ORDER PLACE] SELL order successful but no result or error message" in
+            Lwt.return_unit
+        | { success = false; error = Some error_msg; _ } ->
+            let* () = debug_log (Printf.sprintf "[ORDER PLACE] SELL order failed: %s" error_msg) in
+            Lwt.return_unit
+        | { success = false; error = None; _ } ->
+            let* () = debug_log "[ORDER PLACE] SELL order failed with no error message" in
+            Lwt.return_unit
+        ) >>= fun () ->
+        
+        (* Delay to ensure sell order response is processed *)
+        let* () = Lwt_unix.sleep 1.0 in
+        
+        (* Place the corresponding buy order *)
+        let buy_req_id = Random.int 10000 + 1 in
+        let buy_request = `Assoc [
+          "method", `String "add_order";
+          "params", `Assoc [
+            "symbol", `String symbol;
+            "side", `String "buy";
+            "order_type", `String "limit";
+            "limit_price", `Float buy_limit_price;
+            "order_qty", `Float order_qty;
+            "time_in_force", `String "gtc";
+            "post_only", `Bool true;
+            "token", `String amend_conn.token;
+          ];
+          "req_id", `Int buy_req_id;
+        ] in
+        
+        (* Create promise for buy order response *)
+        let buy_promise, buy_resolver = Lwt.wait () in
+        Hashtbl.set amend_conn.response_promises ~key:buy_req_id ~data:buy_resolver;
+        
+        let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.8f" 
+          symbol order_qty buy_limit_price) in
+        let buy_frame = Frame.create ~content:(Yojson.Safe.to_string buy_request) () in
+        let* () = Websocket_lwt_unix.write amend_conn.conn buy_frame in
+        
+        (* Wait for buy order response *)
+        let* buy_response = Lwt.pick [
+          buy_promise;
+          (let* () = Lwt_unix.sleep 5.0 in
+           Hashtbl.remove amend_conn.response_promises buy_req_id;
+           Lwt.return { success = false; error = Some "Timeout"; result = None })
+        ] in
+        
+        (* Log buy order response *)
+        (match buy_response with
+        | { success = true; result = Some result; error = None } ->
+            let order_id = safe_string result "order_id" "unknown" in
+            let* () = debug_log (Printf.sprintf "[ORDER PLACE] BUY order placed successfully: %s" order_id) in
+            Lwt.return_unit
+        | { success = false; error = Some error_msg; _ } ->
+            let* () = debug_log (Printf.sprintf "[ORDER PLACE] BUY order failed: %s" error_msg) in
+            Lwt.return_unit
+        | _ -> Lwt.return_unit)
+      )
+      (fun e ->
+        let* () = debug_log (Printf.sprintf "[ORDER PLACE] Error sending order: %s - retrying..." 
+          (Exn.to_string e)) in
+        let* () = Lwt_unix.sleep 2.0 in
+        place_orders_with_retry amend_conn symbol current_price (retries - 1))
 
 
+
+
+
+(* Update the original place_orders to use the retry version *)
+let place_orders amend_conn symbol current_price =
+  place_orders_with_retry amend_conn symbol current_price 3
 
 let check_order_validity amend_conn symbol =
   (* Get current price from ticker cache *)
@@ -840,10 +865,16 @@ let check_order_validity amend_conn symbol =
       | `Invalid ->
           (match validity_status.order_id with
           | Some order_id ->
+              (* Recheck current price before amending *)
+              let current_price = 
+                match Hashtbl.find ticker_cache symbol with
+                | Some ticker -> ticker.current_price
+                | None -> validity_status.current_price
+              in
               let price_precision = getprice_precision symbol in
               let* () = debug_log (Printf.sprintf "[ORDER AMEND] Amending order %s (current price: %.8f)" 
-                order_id validity_status.current_price) in
-              amend_order amend_conn symbol order_id validity_status.current_price grid_interval price_precision
+                order_id current_price) in
+              amend_order amend_conn symbol order_id current_price grid_interval price_precision
           | None -> 
               let* () = debug_log "[ORDER AMEND] Error: No order ID available for amendment" in
               Lwt.return_unit)
