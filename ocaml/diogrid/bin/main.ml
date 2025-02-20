@@ -157,7 +157,8 @@ let safe_bool json field default =
 
 let debug_log msg =
   if String.is_prefix msg ~prefix:"[ORDER" ||
-     String.is_prefix msg ~prefix:"[PRICE CHECK]" 
+     String.is_prefix msg ~prefix:"[PRICE CHECK]" ||
+     String.is_prefix msg ~prefix:"[AMEND]" 
   then Lwt_io.printf "%s\n" msg
   else Lwt.return_unit
 
@@ -593,84 +594,131 @@ let rec connect_dedicated_order_connection token retries =
         connect_dedicated_order_connection token (retries - 1))
 
 
+type operation_status = {
+  timestamp: float;
+  in_progress: bool;
+}
+
+
+let pending_operations : (string, operation_status) Hashtbl.t = Hashtbl.create (module String)
+
+let is_operation_in_progress operation_key =
+  match Hashtbl.find pending_operations operation_key with
+  | None -> false
+  | Some status ->
+      if not status.in_progress then false
+      else
+        (* Check if the operation has timed out (30 seconds) *)
+        let now = Core_unix.gettimeofday () in
+        if Float.(now -. status.timestamp > 30.0) then (
+          (* Clear timed out operation *)
+          Hashtbl.remove pending_operations operation_key;
+          false
+        ) else
+          true
+
+let mark_operation_started operation_key =
+  let status = {
+    timestamp = Core_unix.gettimeofday ();
+    in_progress = true;
+  } in
+  Hashtbl.set pending_operations ~key:operation_key ~data:status
+
+let mark_operation_completed operation_key =
+  Hashtbl.remove pending_operations operation_key
+
 
 let amend_order amend_conn symbol order_id current_price grid_interval price_precision =
-  (* Find the order quantity from tracked pairs *)
-  let order_qty =
-    match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
-    | Some (_, _, qty, _, _) -> qty
-    | None -> raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
-  in
+  let operation_key = Printf.sprintf "amend_%s" order_id in
+  if is_operation_in_progress operation_key then (
+    let* () = debug_log (Printf.sprintf "[AMEND] Skipping amendment for %s - another amendment in progress" 
+      order_id) in
+    Lwt.return_unit
+  ) else (
+    mark_operation_started operation_key;
+    
+    (* Rest of the existing amend_order function *)
+    let order_qty =
+      match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
+      | Some (_, _, qty, _, _) -> qty
+      | None -> raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
+    in
 
-  (* Calculate new limit price with correct precision *)
-  let new_limit_price = 
-    round_to_precision
-      (current_price *. (1.0 -. (grid_interval /. 100.0)))
-      price_precision in
-  
-  (* Create request *)
-  let req_id = Random.int 10000 + 1 in (* Avoid 0 and 999 (heartbeat) *)
-  let amend_request = `Assoc [
-    "method", `String "amend_order";
-    "params", `Assoc [
-      "order_id", `String order_id;
-      "limit_price", `Float new_limit_price;
-      "order_qty", `Float order_qty;
-      "post_only", `Bool true;
-      "token", `String amend_conn.token;
-    ];
-    "req_id", `Int req_id;
-  ] in
-  
-  let amend_request_str = Yojson.Safe.to_string amend_request in
-  let* () = debug_log (Printf.sprintf "[AMEND] Preparing request for %s: New limit price %.8f (%.2f%% below %.8f)" 
-    order_id new_limit_price grid_interval current_price) in
-  
-  (* Create a promise for the response *)
-  let response_promise, response_resolver = Lwt.wait () in
-  Hashtbl.set amend_conn.response_promises ~key:req_id ~data:response_resolver;
-  
-  (* Send request *)
-  let frame = Frame.create ~content:amend_request_str () in
-  let* () = Websocket_lwt_unix.write amend_conn.conn frame in
-  let* () = debug_log "[AMEND] Request sent" in
-  
-  (* Wait for response with timeout *)
-  let* response = Lwt.pick [
-    response_promise;
-    (let* () = Lwt_unix.sleep 5.0 in
-     Hashtbl.remove amend_conn.response_promises req_id;
-     Lwt.return { success = false; error = Some "Timeout"; result = None })
-  ] in
-  
-  (* Process response *)
-  match response with
-  | { success = true; result = Some result; error = None } ->
-      let amend_id = safe_string result "amend_id" "unknown" in
-      let amended_order_id = safe_string result "order_id" order_id in
-      debug_log (Printf.sprintf "[AMEND] Success - amend_id: %s, order_id: %s, new price: %.8f" 
-        amend_id amended_order_id new_limit_price)
-  | { success = true; result = Some result; error = Some error_msg } ->
-      let amend_id = safe_string result "amend_id" "unknown" in
-      let amended_order_id = safe_string result "order_id" order_id in
-      debug_log (Printf.sprintf "[AMEND] Partial success - amend_id: %s, order_id: %s, error: %s" 
-        amend_id amended_order_id error_msg)
-  | { success = true; result = None; error = Some error_msg } ->
-      debug_log (Printf.sprintf "[AMEND] Success with error - order_id: %s, error: %s" 
-        order_id error_msg)
-  | { success = true; result = None; error = None } ->
-      debug_log (Printf.sprintf "[AMEND] Success but no details - order_id: %s" order_id)
-  | { success = false; error = Some error_msg; _ } ->
-      debug_log (Printf.sprintf "[AMEND] Failed - order_id: %s, error: %s" 
-        order_id error_msg)
-  | { success = false; error = None; _ } ->
-      debug_log (Printf.sprintf "[AMEND] Failed with no error message - order_id: %s" 
-        order_id)
+    let new_limit_price = 
+      round_to_precision
+        (current_price *. (1.0 -. (grid_interval /. 100.0)))
+        price_precision in
+    
+    let req_id = Random.int 10000 + 1 in
+    let amend_request = `Assoc [
+      "method", `String "amend_order";
+      "params", `Assoc [
+        "order_id", `String order_id;
+        "limit_price", `Float new_limit_price;
+        "order_qty", `Float order_qty;
+        "post_only", `Bool true;
+        "token", `String amend_conn.token;
+      ];
+      "req_id", `Int req_id;
+    ] in
+    
+    let amend_request_str = Yojson.Safe.to_string amend_request in
+    let* () = debug_log (Printf.sprintf "[AMEND] Preparing request for %s: New limit price %.8f (%.2f%% below %.8f)" 
+      order_id new_limit_price grid_interval current_price) in
+    
+    let response_promise, response_resolver = Lwt.wait () in
+    Hashtbl.set amend_conn.response_promises ~key:req_id ~data:response_resolver;
+    
+    let frame = Frame.create ~content:amend_request_str () in
+    let* () = Websocket_lwt_unix.write amend_conn.conn frame in
+    let* () = debug_log "[AMEND] Request sent" in
+    
+    let* response = Lwt.pick [
+      response_promise;
+      (let* () = Lwt_unix.sleep 5.0 in
+       Hashtbl.remove amend_conn.response_promises req_id;
+       Lwt.return { success = false; error = Some "Timeout"; result = None })
+    ] in
+    
+    (* Mark operation as completed regardless of outcome *)
+    mark_operation_completed operation_key;
+    
+    (* Process response *)
+    match response with
+    | { success = true; result = Some result; error = None } ->
+        let amend_id = safe_string result "amend_id" "unknown" in
+        let amended_order_id = safe_string result "order_id" order_id in
+        debug_log (Printf.sprintf "[AMEND] Success - amend_id: %s, order_id: %s, new price: %.8f" 
+          amend_id amended_order_id new_limit_price)
+    | { success = true; result = Some result; error = Some error_msg } ->
+        let amend_id = safe_string result "amend_id" "unknown" in
+        let amended_order_id = safe_string result "order_id" order_id in
+        debug_log (Printf.sprintf "[AMEND] Partial success - amend_id: %s, order_id: %s, error: %s" 
+          amend_id amended_order_id error_msg)
+    | { success = true; result = None; error = Some error_msg } ->
+        debug_log (Printf.sprintf "[AMEND] Success with error - order_id: %s, error: %s" 
+          order_id error_msg)
+    | { success = true; result = None; error = None } ->
+        debug_log (Printf.sprintf "[AMEND] Success but no details - order_id: %s" order_id)
+    | { success = false; error = Some error_msg; _ } ->
+        debug_log (Printf.sprintf "[AMEND] Failed - order_id: %s, error: %s" 
+          order_id error_msg)
+    | { success = false; error = None; _ } ->
+        debug_log (Printf.sprintf "[AMEND] Failed with no error message - order_id: %s" 
+          order_id)
+  )
 
 let rec place_orders_with_retry amend_conn symbol current_price retries =
-  if retries <= 0 then
+  let operation_key = Printf.sprintf "place_orders_%s" symbol in
+  if is_operation_in_progress operation_key then (
+    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Skipping orders for %s - placement already in progress" 
+      symbol) in
+    Lwt.return_unit
+  ) else if retries <= 0 then
     debug_log (Printf.sprintf "[ORDER PLACE] Out of retries placing orders for %s" symbol)
-  else
+  else (
+    mark_operation_started operation_key;
+    
     (* Get the configuration parameters for this symbol *)
     let (_, grid_interval, order_qty, sell_multiplier, price_precision) = 
       match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
@@ -790,26 +838,24 @@ let rec place_orders_with_retry amend_conn symbol current_price retries =
            Lwt.return { success = false; error = Some "Timeout"; result = None })
         ] in
         
+        (* Mark operation as completed before processing response *)
+        mark_operation_completed operation_key;
+        
         (* Log buy order response *)
-        (match buy_response with
+        match buy_response with
         | { success = true; result = Some result; error = None } ->
             let order_id = safe_string result "order_id" "unknown" in
-            let* () = debug_log (Printf.sprintf "[ORDER PLACE] BUY order placed successfully: %s" order_id) in
-            Lwt.return_unit
+            debug_log (Printf.sprintf "[ORDER PLACE] BUY order placed successfully: %s" order_id)
         | { success = false; error = Some error_msg; _ } ->
-            let* () = debug_log (Printf.sprintf "[ORDER PLACE] BUY order failed: %s" error_msg) in
-            Lwt.return_unit
+            debug_log (Printf.sprintf "[ORDER PLACE] BUY order failed: %s" error_msg)
         | _ -> Lwt.return_unit)
-      )
       (fun e ->
+        (* Mark operation as completed on error *)
+        mark_operation_completed operation_key;
         let* () = debug_log (Printf.sprintf "[ORDER PLACE] Error sending order: %s - retrying..." 
           (Exn.to_string e)) in
         let* () = Lwt_unix.sleep 2.0 in
-        place_orders_with_retry amend_conn symbol current_price (retries - 1))
-
-
-
-
+        place_orders_with_retry amend_conn symbol current_price (retries - 1)))
 
 (* Update the original place_orders to use the retry version *)
 let place_orders amend_conn symbol current_price =
@@ -865,16 +911,10 @@ let check_order_validity amend_conn symbol =
       | `Invalid ->
           (match validity_status.order_id with
           | Some order_id ->
-              (* Recheck current price before amending *)
-              let current_price = 
-                match Hashtbl.find ticker_cache symbol with
-                | Some ticker -> ticker.current_price
-                | None -> validity_status.current_price
-              in
               let price_precision = getprice_precision symbol in
-              let* () = debug_log (Printf.sprintf "[ORDER AMEND] Amending order %s (current price: %.8f)" 
-                order_id current_price) in
-              amend_order amend_conn symbol order_id current_price grid_interval price_precision
+              let* () = debug_log (Printf.sprintf "[ORDER AMEND] Amending order %s (limit price: %.8f)" 
+                order_id order.limit_price) in
+              amend_order amend_conn symbol order_id validity_status.current_price grid_interval price_precision
           | None -> 
               let* () = debug_log "[ORDER AMEND] Error: No order ID available for amendment" in
               Lwt.return_unit)
