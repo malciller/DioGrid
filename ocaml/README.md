@@ -11,6 +11,7 @@ A market making bot for Kraken cryptocurrency exchange that automatically places
 - Comprehensive logging and error handling
 
 ## Configuration
+Dockerfile included.
 
 ### 1. API Keys
 
