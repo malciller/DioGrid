@@ -7,7 +7,6 @@ open Websocket
 open Lwt.Infix
 
 module B = Bytes
-
 (*====================
 TRADING CONFIGURATION
 =====================*)
@@ -150,7 +149,6 @@ let safe_bool_opt json field =
     | _ -> None
   with _ -> None
 
-
 let safe_bool json field default =
   match safe_bool_opt json field with
   | Some v -> v
@@ -169,7 +167,6 @@ let debug_log msg =
      String.is_prefix msg ~prefix:"[ORDER SUMMARY]"
   then Lwt_io.printf "%s\n" msg
   else Lwt.return_unit
-
 
 (* Update public subscribe/unsubscribe messages *)
 let instrument_subscribe_message () =
@@ -300,8 +297,6 @@ let log_open_orders () =
   Lwt_list.iter_s (fun (_key, order) ->
     debug_log (format_order_log order "ACTIVE")
   ) orders
-
-
 
 (* temporary cache for pending orders *)
 let pending_orders : (string, order) Hashtbl.t = Hashtbl.create (module String)
@@ -503,8 +498,6 @@ let format_precision value precision =
   let factor = 10.0 ** float_of_int precision in
   Float.round_down (value *. factor) /. factor
 
-
-
 type amend_response = {
   success: bool;
   error: string option;
@@ -624,14 +617,10 @@ and read_order_connection_frames amend_conn =
           let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
           read_order_connection_frames new_conn)
 
-
-
-
 type operation_status = {
   timestamp: float;
   in_progress: bool;
 }
-
 
 let pending_operations : (string, operation_status) Hashtbl.t = Hashtbl.create (module String)
 
@@ -941,10 +930,6 @@ let place_orders amend_conn symbol current_price =
     let _ = update_rate_counter symbol 2.0 in
     Lwt.return_unit
   )
-
-
-
-
 
 let check_order_validity amend_conn symbol =
   (* Get current price from ticker cache *)
