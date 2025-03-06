@@ -7,20 +7,21 @@ open Websocket
 open Lwt.Infix
 
 module B = Bytes
+
 (*====================
 TRADING CONFIGURATION
 =====================*)
 let tracked_pairs = [
 (*Pair, grid_interval, order_qty, sell_multiplier, price_precision*)
-  ("BTC/USD", 0.75, 0.000875, 0.999, 1);
-  ("ETH/USD", 2.5, 0.0045, 0.999, 2);
+  ("BTC/USD", 0.75, 0.001, 0.999, 1);
   ("XRP/USD", 2.5, 5.0, 0.999, 5);
-  ("SOL/USD", 2.5, 0.07, 0.999, 2);
-  ("ADA/USD", 2.5, 18.0, 0.999, 6);
-  ("TRX/USD", 2.5, 55.0, 0.999, 6);
-  ("DOT/USD", 2.5, 2.5, 0.999, 4);
-  ("INJ/USD", 2.5, 0.81, 0.999, 3);
-  ("KSM/USD", 2.5, 0.6, 0.999, 2);
+  ("SOL/USD", 3.0, 0.07, 0.999, 2);
+  ("ADA/USD", 2.5, 18.0, 0.999, 6); 
+  ("ETH/USD", 3.0, 0.0047, 0.999, 2);
+  ("TRX/USD", 3.0, 55.0, 0.999, 6);
+  ("DOT/USD", 3.0, 2.5, 0.999, 4); 
+  ("INJ/USD", 3.0, 0.85, 0.999, 3);
+  ("KSM/USD", 3.0, 0.6, 0.999, 2); 
 ]
 
 (*===========================
@@ -125,7 +126,7 @@ let safe_int_opt json field =
     | x -> Some (Yojson.Safe.Util.to_int x)
   with _ -> None
 
-let safe_int json field default =
+let[@warning "-32"] safe_int json field default =
   match safe_int_opt json field with
   | Some v -> v
   | None -> default
@@ -149,24 +150,28 @@ let safe_bool_opt json field =
     | _ -> None
   with _ -> None
 
-let safe_bool json field default =
+let[@warning "-32"] safe_bool json field default =
   match safe_bool_opt json field with
   | Some v -> v
   | None -> default
 
 let debug_log msg =
+  let timestamp = Core_unix.gettimeofday () |> Core_unix.localtime |> fun tm ->
+    Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d"
+      (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday
+      tm.tm_hour tm.tm_min tm.tm_sec
+  in
   if String.is_prefix msg ~prefix:"Error" ||
+     String.is_prefix msg ~prefix:"[PRIVATE]" ||
      String.is_prefix msg ~prefix:"API error" ||
      String.is_prefix msg ~prefix:"[PRICE DEBUG]" ||
      String.is_prefix msg ~prefix:"[CACHE" ||
      String.is_prefix msg ~prefix:"[AMEND" || 
      String.is_prefix msg ~prefix:"[RATE LIMIT]" ||
-     String.is_prefix msg ~prefix:"[ORDER PLACE]" ||
-     String.is_prefix msg ~prefix:"[ORDER UPDATE]" ||
-     String.is_prefix msg ~prefix:"[ORDER ACTIVE]" ||
-     String.is_prefix msg ~prefix:"[ORDER SUMMARY]"
-  then Lwt_io.printf "%s\n" msg
+     String.is_prefix msg ~prefix:"[ORDER"
+  then Lwt_io.printf "[%s] %s\n" timestamp msg
   else Lwt.return_unit
+
 
 (* Update public subscribe/unsubscribe messages *)
 let instrument_subscribe_message () =
@@ -204,7 +209,7 @@ type ticker_data = {
   _volume: float;
 }
 
-type order_side = Buy | Sell
+type order_side = Buy | Sell | Unknown
 
 type order_status = 
   | PendingNew
@@ -256,7 +261,11 @@ let parse_instrument_data json =
 let parse_order_side = function
   | "buy" -> Buy
   | "sell" -> Sell
-  | s -> raise (Invalid_argument (Printf.sprintf "Invalid order side: %s" s))
+  | "" -> Unknown  (* Handle empty string case *)
+  | s -> 
+      (* Log the unknown side but don't make it an Lwt operation *)
+      Printf.eprintf "[ORDER] Unknown order side: '%s'\n" s;
+      Unknown  (* Handle any other unexpected values *)
 
 let parse_order_status = function
   | "pending_new" -> PendingNew
@@ -272,6 +281,7 @@ let open_buy_orders = Hashtbl.create (module String)
 let format_order_side = function
   | Buy -> "BUY"
   | Sell -> "SELL"
+  | Unknown -> "UNKNOWN"
 
 let format_order_status = function
   | PendingNew -> "PENDING"
@@ -297,6 +307,8 @@ let log_open_orders () =
   Lwt_list.iter_s (fun (_key, order) ->
     debug_log (format_order_log order "ACTIVE")
   ) orders
+
+
 
 (* temporary cache for pending orders *)
 let pending_orders : (string, order) Hashtbl.t = Hashtbl.create (module String)
@@ -473,7 +485,7 @@ let parse_execution_message json =
                 | _ -> Lwt.return_unit  (* Skip non-buy orders or untracked pairs *)
           ) data
       | _ -> 
-          let* () = debug_log (Printf.sprintf "[PRIVATE] Ignoring unknown channel: %s" channel) in
+          let* () = debug_log (Printf.sprintf "[DEBUG] Ignoring unknown channel: %s" channel) in
           Lwt.return_unit)
     (fun e ->
       debug_log (Printf.sprintf "[PRIVATE] Error parsing execution: %s" (Exn.to_string e)))
@@ -498,124 +510,21 @@ let format_precision value precision =
   let factor = 10.0 ** float_of_int precision in
   Float.round_down (value *. factor) /. factor
 
+
+
 type amend_response = {
   success: bool;
   error: string option;
   result: Yojson.Safe.t option;
 }
 
-type order_connection = {
+(* Keep the private connection plus request promise resolvers in one record *)
+type private_conn_state = {
   conn: Websocket_lwt_unix.conn;
   token: string;
   response_promises: (int, amend_response Lwt.u) Hashtbl.t;
-  mutable last_active: float;
+  mutable _last_active: float;
 }
-
-let create_order_connection conn token =
-  {
-    conn;
-    token;
-    response_promises = Hashtbl.create (module Int);
-    last_active = Core_unix.gettimeofday ();
-  }
-
-let is_connection_alive conn =
-  let now = Core_unix.gettimeofday () in
-  if Float.(now -. conn.last_active > 30.0) then  (* Only ping after 30 seconds of inactivity *)
-    Lwt.catch
-      (fun () ->
-        let heartbeat = `Assoc [
-          "method", `String "ping";
-          "req_id", `Int 999999
-        ] in
-        let frame = Frame.create ~content:(Yojson.Safe.to_string heartbeat) () in
-        Websocket_lwt_unix.write conn.conn frame >>= fun () ->
-        Lwt.return true)
-      (fun _ -> Lwt.return false)
-  else
-    Lwt.return true
-
-let update_last_active conn =
-  conn.last_active <- Core_unix.gettimeofday ()
-
-let rec connect_dedicated_order_connection token retries =
-  let* () = debug_log (Printf.sprintf "\n[AMEND] Attempting connection (retries left: %d)" retries) in
-  if retries <= 0 then 
-    Lwt.fail (Failure "[AMEND] Out of retries for connection")
-  else
-    let url = Uri.of_string "wss://ws-auth.kraken.com/v2" in
-    let ctx = Lazy.force Conduit_lwt_unix.default_ctx in
-    Lwt.catch
-      (fun () ->
-        let* () = debug_log "[AMEND] Connecting..." in
-        let* conn = Websocket_lwt_unix.connect ~ctx 
-          (`TLS (`Hostname "ws-auth.kraken.com", 
-                `IP (Ipaddr.of_string_exn "104.16.248.94"), 
-                `Port 443)) url in
-        
-        let amend_conn = create_order_connection conn token in
-        
-        (* Start background read loop *)
-        Lwt.async (fun () -> read_order_connection_frames amend_conn);
-        
-        Lwt.return amend_conn)
-      (fun e ->
-        let* () = debug_log (Printf.sprintf "[AMEND] Connection error: %s" (Exn.to_string e)) in
-        let* () = Lwt_unix.sleep 2.0 in
-        connect_dedicated_order_connection token (retries - 1))
-
-and read_order_connection_frames amend_conn =
-  Lwt.catch
-    (fun () ->
-      let* frame = Websocket_lwt_unix.read amend_conn.conn in
-      let msg = frame.content in
-      update_last_active amend_conn;  (* Update the last active timestamp *)
-      
-      (* Only log non-pong messages *)
-      let* () = 
-        if not (String.is_substring msg ~substring:"pong") then
-          debug_log (Printf.sprintf "[AMEND] Received: %s" msg)
-        else
-          Lwt.return_unit
-      in
-      
-      (* Parse the message *)
-      let json = Yojson.Safe.from_string msg in
-      let req_id = safe_int json "req_id" (-1) in
-      
-      (* If this is a response to a pending request, resolve its promise *)
-      if req_id >= 0 then
-        match Hashtbl.find_and_remove amend_conn.response_promises req_id with
-        | Some resolver ->
-            let success = safe_bool json "success" false in
-            let error = 
-              match member "error" json with
-              | `List errors -> Some (String.concat ~sep:", " (List.map ~f:to_string errors))
-              | `String error -> Some error
-              | `Null -> None
-              | _ -> Some "Unknown error"
-            in
-            let result = 
-              match member "result" json with
-              | `Null -> None
-              | result -> Some result
-            in
-            Lwt.wakeup resolver { success; error; result };
-            read_order_connection_frames amend_conn
-        | None ->
-            read_order_connection_frames amend_conn
-      else
-        read_order_connection_frames amend_conn)
-    (function
-      | End_of_file ->
-          let* () = debug_log "[AMEND] Connection closed" in
-          let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
-          read_order_connection_frames new_conn
-      | exn ->
-          let* () = debug_log (Printf.sprintf "[AMEND] Error: %s" (Exn.to_string exn)) in
-          let* () = Lwt_unix.sleep 2.0 in
-          let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
-          read_order_connection_frames new_conn)
 
 type operation_status = {
   timestamp: float;
@@ -671,7 +580,6 @@ let update_rate_counter symbol cost =
   Hashtbl.set rate_counters ~key:symbol ~data:new_rate;
   new_rate
 
-
 let rec wait_for_rate_limit symbol transaction_cost =
   let current_rate = get_rate_counter symbol in
   if Float.(current_rate +. transaction_cost > rate_threshold) then (
@@ -682,7 +590,8 @@ let rec wait_for_rate_limit symbol transaction_cost =
   ) else
     Lwt.return_unit
 
-let rec amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision retries =
+(* Updated amend_order function to use the unified private connection *)
+let rec amend_order_with_retry (pconn : private_conn_state) symbol order_id current_price grid_interval price_precision retries =
   (* Add rate limit check before attempting amendment *)
   let* () = wait_for_rate_limit symbol 4.0 in  (* 1.0 for fixed + 3.0 for <5s decay *)
   
@@ -696,78 +605,70 @@ let rec amend_order_with_retry amend_conn symbol order_id current_price grid_int
       let* () = debug_log (Printf.sprintf "[AMEND] Operation in progress for %s - waiting 2 seconds before retry (%d left)" 
         order_id retries) in
       let* () = Lwt_unix.sleep 2.0 in
-      amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision (retries - 1)
+      amend_order_with_retry pconn symbol order_id current_price grid_interval price_precision (retries - 1)
     ) else (
-      let* is_alive = is_connection_alive amend_conn in
-      if not is_alive then (
-        let* () = debug_log "[AMEND] Connection dead, attempting to reconnect..." in
-        let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
-        amend_order_with_retry new_conn symbol order_id current_price grid_interval price_precision retries
-      ) else (
-        mark_operation_started operation_key;
-        let order_qty =
-          match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
-          | Some (_, _, qty, _, _) -> qty
-          | None -> raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
-        in
-        let new_limit_price_raw = current_price *. (1.0 -. (grid_interval /. 100.0)) in
-        let new_limit_price = format_precision new_limit_price_raw price_precision in
-        let req_id = Random.int 10000 + 1 in
-        let amend_request = `Assoc [
-          "method", `String "amend_order";
-          "params", `Assoc [
-            "order_id", `String order_id;
-            "limit_price", `Float new_limit_price;
-            "order_qty", `Float order_qty;
-            "post_only", `Bool true;
-            "token", `String amend_conn.token;
-          ];
-          "req_id", `Int req_id;
-        ] in
-        let amend_request_str = Yojson.Safe.to_string amend_request in
-        let* () = debug_log (Printf.sprintf "[AMEND] Preparing request for %s: New limit price %.8f (%.2f%% below %.8f)" 
-          order_id new_limit_price grid_interval current_price) in
-        let response_promise, response_resolver = Lwt.wait () in
-        Hashtbl.set amend_conn.response_promises ~key:req_id ~data:response_resolver;
-        Lwt.catch
-          (fun () ->
-            let frame = Frame.create ~content:amend_request_str () in
-            let* () = Websocket_lwt_unix.write amend_conn.conn frame in
-            let* () = debug_log "[AMEND] Request sent" in
-            let* response = Lwt.pick [
-              response_promise;
-              (let* () = Lwt_unix.sleep 5.0 in
-               Hashtbl.remove amend_conn.response_promises req_id;
-               Lwt.return { success = false; error = Some "Timeout"; result = None })
-            ] in
-            mark_operation_completed operation_key;
-            match response with
-            | { success = true; result = Some result; error = None } ->
-                let amend_id = safe_string result "amend_id" "unknown" in
-                let amended_order_id = safe_string result "order_id" order_id in
-                let* () = debug_log (Printf.sprintf "[AMEND] Success - amend_id: %s, order_id: %s, new price: %.8f" 
-                  amend_id amended_order_id new_limit_price) in
-                (* Update rate counter on successful amendment *)
-                let _ = update_rate_counter symbol 4.0 in
-                Lwt.return_unit
-            | { success = false; error = Some error_msg; _ } ->
-                let* () = debug_log (Printf.sprintf "[AMEND] Failed - order_id: %s, error: %s" 
-                  order_id error_msg) in
-                let* () = Lwt_unix.sleep 2.0 in
-                amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision (retries - 1)
-            | _ ->
-                let* () = debug_log (Printf.sprintf "[AMEND] Unexpected response for order %s" order_id) in
-                let* () = Lwt_unix.sleep 2.0 in
-                amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision (retries - 1)
-          )
-          (fun e ->
-            mark_operation_completed operation_key;
-            let* () = debug_log (Printf.sprintf "[AMEND] Error: %s - retrying..." (Exn.to_string e)) in
-            let* () = Lwt_unix.sleep 2.0 in
-            amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision (retries - 1))
-      )
+      mark_operation_started operation_key;
+      let order_qty =
+        match List.find tracked_pairs ~f:(fun (pair, _, _, _, _) -> String.equal pair symbol) with
+        | Some (_, _, qty, _, _) -> qty
+        | None -> raise (Invalid_argument (Printf.sprintf "Symbol %s not found in tracked pairs" symbol))
+      in
+      let new_limit_price_raw = current_price *. (1.0 -. (grid_interval /. 100.0)) in
+      let new_limit_price = format_precision new_limit_price_raw price_precision in
+      let req_id = Random.int 10000 + 1 in
+      let amend_request = `Assoc [
+        "method", `String "amend_order";
+        "params", `Assoc [
+          "order_id", `String order_id;
+          "limit_price", `Float new_limit_price;
+          "order_qty", `Float order_qty;
+          "post_only", `Bool true;
+          "token", `String pconn.token;
+        ];
+        "req_id", `Int req_id;
+      ] in
+      let amend_request_str = Yojson.Safe.to_string amend_request in
+      let* () = debug_log (Printf.sprintf "[AMEND] Preparing request for %s: New limit price %.8f (%.2f%% below %.8f)" 
+        order_id new_limit_price grid_interval current_price) in
+      let response_promise, response_resolver = Lwt.wait () in
+      Hashtbl.set pconn.response_promises ~key:req_id ~data:response_resolver;
+      Lwt.catch
+        (fun () ->
+          let frame = Frame.create ~content:amend_request_str () in
+          let* () = Websocket_lwt_unix.write pconn.conn frame in
+          let* () = debug_log "[AMEND] Request sent" in
+          let* response = Lwt.pick [
+            response_promise;
+            (let* () = Lwt_unix.sleep 5.0 in
+             Hashtbl.remove pconn.response_promises req_id;
+             Lwt.return { success = false; error = Some "Timeout"; result = None })
+          ] in
+          mark_operation_completed operation_key;
+          match response with
+          | { success = true; result = Some result; error = None } ->
+              let amend_id = safe_string result "amend_id" "unknown" in
+              let amended_order_id = safe_string result "order_id" order_id in
+              let* () = debug_log (Printf.sprintf "[AMEND] Success - amend_id: %s, order_id: %s, new price: %.8f" 
+                amend_id amended_order_id new_limit_price) in
+              (* Update rate counter on successful amendment *)
+              let _ = update_rate_counter symbol 4.0 in
+              Lwt.return_unit
+          | { success = false; error = Some error_msg; _ } ->
+              let* () = debug_log (Printf.sprintf "[AMEND] Failed - order_id: %s, error: %s" 
+                order_id error_msg) in
+              let* () = Lwt_unix.sleep 2.0 in
+              amend_order_with_retry pconn symbol order_id current_price grid_interval price_precision (retries - 1)
+          | _ ->
+              let* () = debug_log (Printf.sprintf "[AMEND] Unexpected response for order %s" order_id) in
+              let* () = Lwt_unix.sleep 2.0 in
+              amend_order_with_retry pconn symbol order_id current_price grid_interval price_precision (retries - 1)
+        )
+        (fun e ->
+          mark_operation_completed operation_key;
+          let* () = debug_log (Printf.sprintf "[AMEND] Error: %s - retrying..." (Exn.to_string e)) in
+          let* () = Lwt_unix.sleep 2.0 in
+          amend_order_with_retry pconn symbol order_id current_price grid_interval price_precision (retries - 1))
     )
-
 
 
 let has_existing_order symbol =
@@ -795,10 +696,11 @@ let has_existing_order symbol =
     Lwt.return (open_exists || pending_exists)
 
 
-let amend_order amend_conn symbol order_id current_price grid_interval price_precision =
-  amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision 3
+let amend_order pconn symbol order_id current_price grid_interval price_precision =
+  amend_order_with_retry pconn symbol order_id current_price grid_interval price_precision 3
 
-let place_orders amend_conn symbol current_price =
+(* Updated place_orders function to use the unified private connection *)
+let place_orders (pconn : private_conn_state) symbol current_price =
   (* Add rate limit check before placing orders *)
   let* () = wait_for_rate_limit symbol 2.0 in  (* 1.0 each for buy and sell orders *)
   
@@ -854,22 +756,22 @@ let place_orders amend_conn symbol current_price =
         "order_qty", `Float sell_qty;
         "time_in_force", `String "gtc";
         "post_only", `Bool true;
-        "token", `String amend_conn.token;
+        "token", `String pconn.token;
       ];
       "req_id", `Int sell_req_id;
     ] in
     let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.1f" 
       symbol sell_qty sell_limit_price) in
     let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
-    let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
+    let* () = Websocket_lwt_unix.write pconn.conn sell_frame in
     
     (* Wait for sell order response *)
     let sell_promise, sell_resolver = Lwt.wait () in
-    Hashtbl.set amend_conn.response_promises ~key:sell_req_id ~data:sell_resolver;
+    Hashtbl.set pconn.response_promises ~key:sell_req_id ~data:sell_resolver;
     let* sell_response = Lwt.pick [
       sell_promise;
       (let* () = Lwt_unix.sleep 5.0 in
-       Hashtbl.remove amend_conn.response_promises sell_req_id;
+       Hashtbl.remove pconn.response_promises sell_req_id;
        Lwt.return { success = false; error = Some "Timeout"; result = None })
     ] in
 
@@ -896,22 +798,22 @@ let place_orders amend_conn symbol current_price =
         "order_qty", `Float order_qty;
         "time_in_force", `String "gtc";
         "post_only", `Bool true;
-        "token", `String amend_conn.token;
+        "token", `String pconn.token;
       ];
       "req_id", `Int buy_req_id;
     ] in
     let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.1f" 
       symbol order_qty buy_limit_price) in
     let buy_frame = Frame.create ~content:(Yojson.Safe.to_string buy_request) () in
-    let* () = Websocket_lwt_unix.write amend_conn.conn buy_frame in
+    let* () = Websocket_lwt_unix.write pconn.conn buy_frame in
     
     (* Wait for buy order response *)
     let buy_promise, buy_resolver = Lwt.wait () in
-    Hashtbl.set amend_conn.response_promises ~key:buy_req_id ~data:buy_resolver;
+    Hashtbl.set pconn.response_promises ~key:buy_req_id ~data:buy_resolver;
     let* buy_response = Lwt.pick [
       buy_promise;
       (let* () = Lwt_unix.sleep 5.0 in
-       Hashtbl.remove amend_conn.response_promises buy_req_id;
+       Hashtbl.remove pconn.response_promises buy_req_id;
        Lwt.return { success = false; error = Some "Timeout"; result = None })
     ] in
     
@@ -931,7 +833,8 @@ let place_orders amend_conn symbol current_price =
     Lwt.return_unit
   )
 
-let check_order_validity amend_conn symbol =
+(* Updated check_order_validity function to use the unified private connection *)
+let check_order_validity (pconn : private_conn_state) symbol =
   (* Get current price from ticker cache *)
   let current_price =
     match Hashtbl.find ticker_cache symbol with
@@ -965,11 +868,10 @@ let check_order_validity amend_conn symbol =
         price_diff_pct;
         order_id = Some order.order_id;
       } in
-      let* () = debug_log (Printf.sprintf "[ORDER CHECK] %s - %s\n  Current Price: %.8f\n  Limit Price:  %.8f\n  Diff: %.2f%% (max %.2f%%)"
+      let* () = debug_log (Printf.sprintf "[ORDER CHECK] %s - %s  Current Price: %.8f Diff: %.2f%% (max %.2f%%)"
         symbol
         (match validity_status.status with | `Valid -> "VALID" | `Invalid -> "INVALID" | `None -> "NONE")
         current_price
-        order.limit_price
         validity_status.price_diff_pct
         (2.0 *. grid_interval))
       in
@@ -979,7 +881,7 @@ let check_order_validity amend_conn symbol =
             | Some order_id ->
                 let price_precision = getprice_precision symbol in
                 let* () = debug_log (Printf.sprintf "[ORDER AMEND] Amending order %s (limit price: %.8f)" order_id order.limit_price) in
-                amend_order amend_conn symbol order_id validity_status.current_price grid_interval price_precision
+                amend_order pconn symbol order_id validity_status.current_price grid_interval price_precision
             | None -> Lwt.return_unit)
        | _ -> Lwt.return_unit)
   | None ->
@@ -994,35 +896,10 @@ let check_order_validity amend_conn symbol =
       if has_order then
         debug_log (Printf.sprintf "[ORDER SKIP] %s - Order already exists or pending" symbol)
       else
-        place_orders amend_conn symbol current_price
+        place_orders pconn symbol current_price
 
-
-let rec read_private_frames conn =
-  let* () = debug_log "[PRIVATE] Waiting for next private frame..." in
-  Lwt.catch
-    (fun () ->
-      let* frame = Websocket_lwt_unix.read conn in
-      let message = frame.content in
-      let* () = debug_log (Printf.sprintf "[PRIVATE] Received message: %s" message) in
-      try
-        let json = Yojson.Safe.from_string message in
-        let* () = parse_execution_message json in
-        read_private_frames conn
-      with e ->
-        let* () = debug_log (Printf.sprintf "[PRIVATE] Error processing message: %s" (Exn.to_string e)) in
-        read_private_frames conn)
-    (fun e ->
-      match e with
-      | End_of_file ->
-          let* () = debug_log "[PRIVATE] Connection closed, stopping read_private_frames." in
-          Lwt.return_unit
-      | _ ->
-          let* () = debug_log (Printf.sprintf "[PRIVATE] Error reading frame: %s" (Exn.to_string e)) in
-          read_private_frames conn)
-
-
-let rec read_frames public_conn private_conn amend_conn token =
-  let* () = debug_log "Waiting for next frame..." in
+(* Updated read_frames function to use the unified private connection *)
+let rec read_frames public_conn (pconn : private_conn_state) =
   Lwt.catch
     (fun () ->
       Websocket_lwt_unix.read public_conn >>= fun frame ->
@@ -1037,7 +914,7 @@ let rec read_frames public_conn private_conn amend_conn token =
       match json_opt with
       | None -> 
           let* () = debug_log "Failed to parse JSON message" in
-          read_frames public_conn private_conn amend_conn token
+          read_frames public_conn pconn
       | Some json ->
           let channel_opt = json |> member "channel" |> to_string_option in
           let event_opt = json |> member "event" |> to_string_option in
@@ -1063,24 +940,18 @@ let rec read_frames public_conn private_conn amend_conn token =
                         current_price;
                         _volume = safe_float ticker "volume" 0.0;
                       } in
-                      Hashtbl.set ticker_cache ~key:symbol ~data:ticker_data);
+                      Hashtbl.set ticker_cache ~key:symbol ~data:ticker_data;
                       
-                      (* Check amend connection health before order validity check *)
-                      let* is_alive = is_connection_alive amend_conn in
-                      if not is_alive then (
-                        let* () = debug_log "[AMEND] Connection dead, attempting to reconnect..." in
-                        let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
-                        let* () = check_order_validity new_conn symbol in
-                        read_frames public_conn private_conn new_conn token
-                      ) else (
-                        let* () = check_order_validity amend_conn symbol in
-                        read_frames public_conn private_conn amend_conn token
-                    )
-                | _ -> read_frames public_conn private_conn amend_conn token
+                      (* Check order validity with our unified private connection *)
+                      let* () = check_order_validity pconn symbol in
+                      read_frames public_conn pconn
+                    ) else
+                      read_frames public_conn pconn
+                | _ -> read_frames public_conn pconn
               with e -> 
                 let* () = debug_log (Printf.sprintf "[TICKER] Error processing ticker: %s" 
                   (Exn.to_string e)) in
-                read_frames public_conn private_conn amend_conn token)
+                read_frames public_conn pconn)
           | (_, Some "instrument") ->
               let data_type = json |> member "type" |> to_string_option in
               let* () = debug_log (Printf.sprintf "Instrument message type: %s" 
@@ -1097,29 +968,19 @@ let rec read_frames public_conn private_conn amend_conn token =
                   let sub_ticker_frame = Frame.create ~content:(ticker_subscribe_message tracked_pairs) () in
                   let* () = debug_log "Subscribing to ticker channel..." in
                   let* () = Websocket_lwt_unix.write public_conn sub_ticker_frame in
-                  read_frames public_conn private_conn amend_conn token
+                  read_frames public_conn pconn
               | _ -> 
                   let* () = debug_log "Skipping non-snapshot instrument message" in
-                  read_frames public_conn private_conn amend_conn token)
-          | (_, Some "executions") ->
-              let* () = debug_log "[PRIVATE] Processing execution message" in
-              let* () = debug_log (Printf.sprintf "[PRIVATE] Raw message: %s" message) in
-              let* () = parse_execution_message json in
-              read_frames public_conn private_conn amend_conn token
-          | (_, Some "status") -> 
-              let* () = debug_log "Received status message" in
-              read_frames public_conn private_conn amend_conn token
-          | (_, Some "heartbeat") -> 
-              let* () = debug_log "Received heartbeat" in
-              read_frames public_conn private_conn amend_conn token
+                  read_frames public_conn pconn)
           | _ -> 
               let* () = debug_log "Received unknown message type" in
-              read_frames public_conn private_conn amend_conn token)
+              read_frames public_conn pconn)
     (fun e ->
       let* () = debug_log (Printf.sprintf "Error in read_frames: %s" (Exn.to_string e)) in
-      read_frames public_conn private_conn amend_conn token)
+      read_frames public_conn pconn)
 
-let rec connect_public private_conn amend_conn token retries =
+(* Updated connect_public function to use the unified private connection *)
+let rec connect_public (pconn : private_conn_state) retries =
   let* () = debug_log (Printf.sprintf "Attempting public connection (retries left: %d)" retries) in
   if retries <= 0 then 
     debug_log "Out of retries for public connection" >>= fun () ->
@@ -1139,14 +1000,14 @@ let rec connect_public private_conn amend_conn token retries =
         let* () = debug_log (Printf.sprintf "Sending instrument subscribe message: %s" sub_msg) in
         let frame = Frame.create ~content:sub_msg () in
         Websocket_lwt_unix.write public_conn frame >>= fun () ->
-        read_frames public_conn private_conn amend_conn token)
+        read_frames public_conn pconn)
       (fun e ->
         debug_log (Printf.sprintf "Connection error: %s" (Exn.to_string e)) >>= fun () ->
         Lwt_unix.sleep 2.0 >>= fun () ->
-        connect_public private_conn amend_conn token (retries - 1))
+        connect_public pconn (retries - 1))
 
-
-let rec connect_private token retries =
+(* Update the private connection function to return our new state record *)
+let rec connect_private token retries : private_conn_state Lwt.t =
   let* () = debug_log (Printf.sprintf "\n[PRIVATE] Attempting private connection (retries left: %d)" retries) in
   if retries <= 0 then 
     Lwt.fail (Failure "[PRIVATE] Out of retries for private connection")
@@ -1156,26 +1017,74 @@ let rec connect_private token retries =
     Lwt.catch
       (fun () ->
         let* () = debug_log "[PRIVATE] Connecting to private WebSocket..." in
-        let* private_conn = Websocket_lwt_unix.connect ~ctx 
-          (`TLS (`Hostname "ws-auth.kraken.com", 
-                `IP (Ipaddr.of_string_exn "104.16.248.94"), 
-                `Port 443)) url in
+        let* private_conn = 
+          try
+            Websocket_lwt_unix.connect ~ctx 
+              (`TLS (`Hostname "ws-auth.kraken.com", 
+                    `IP (Ipaddr.of_string_exn "104.16.248.94"), 
+                    `Port 443)) url
+          with e ->
+            let* () = debug_log (Printf.sprintf "[PRIVATE] Connection exception: %s" (Exn.to_string e)) in
+            Lwt.fail e
+        in
         let* () = debug_log "[PRIVATE] Connected successfully to private feed" in
         let sub_msg = private_subscribe_message token in
         let* () = debug_log (Printf.sprintf "[PRIVATE] Sending private subscribe message: %s" sub_msg) in
         let frame = Frame.create ~content:sub_msg () in
-        let* () = Websocket_lwt_unix.write private_conn frame in
-        let* () = debug_log "[PRIVATE] Subscription message sent" in
+        let* () = 
+          try
+            Websocket_lwt_unix.write private_conn frame
+          with e ->
+            let* () = debug_log (Printf.sprintf "[PRIVATE] Write exception: %s" (Exn.to_string e)) in
+            Lwt.fail e
+        in
         
-        Lwt.return private_conn)
+        let private_conn_state = {
+          conn = private_conn;
+          token = token;
+          response_promises = Hashtbl.create (module Int);
+          _last_active = Core_unix.gettimeofday ();
+        } in
+        Lwt.return private_conn_state)
       (fun e ->
-        debug_log (Printf.sprintf "Connection error: %s" (Exn.to_string e)) >>= fun () ->
-        Lwt_unix.sleep 2.0 >>= fun () ->
+        let* () = debug_log (Printf.sprintf "[PRIVATE] Connection error: %s" (Exn.to_string e)) in
+        let* () = Lwt_unix.sleep 2.0 in
         connect_private token (retries - 1))
 
-(*==================================
-MAIN FUNCTION
-===================================*)
+(* Unified read loop for private connection that handles both execution updates and command responses *)
+let rec read_private_frames (pconn : private_conn_state) =
+  Lwt.catch
+    (fun () ->
+      Websocket_lwt_unix.read pconn.conn >>= fun frame ->
+      let message = frame.content in
+      
+      (* Parse the JSON message safely *)
+      let json_opt =
+        try Some (Yojson.Safe.from_string message)
+        with _ -> None
+      in
+
+      match json_opt with
+      | None -> 
+          let* () = debug_log "Failed to parse JSON message" in
+          read_private_frames pconn
+      | Some json ->
+          let channel_opt = json |> member "channel" |> to_string_option in
+          let event_opt = json |> member "event" |> to_string_option in
+          
+          match (event_opt, channel_opt) with
+          | (_, Some "executions") ->
+              let* () = parse_execution_message json in
+              read_private_frames pconn
+          | (_, Some "instrument") ->
+              let* () = debug_log "Received instrument message" in
+              read_private_frames pconn
+          | _ -> 
+              let* () = debug_log "Received unknown message type" in
+              read_private_frames pconn)
+    (fun e ->
+      let* () = debug_log (Printf.sprintf "Error in read_private_frames: %s" (Exn.to_string e)) in
+      read_private_frames pconn)
 
 let main () =
   printf "Starting Kraken API application...\n";
@@ -1189,14 +1098,18 @@ let main () =
           printf "[PRIVATE] WebSocket Token obtained: %s (expires in %d seconds)\n" 
             ws_token.token ws_token.expires;
           
-          (* Create both private and amend connections *)
-          let* private_conn = connect_private ws_token.token 3 in
-          let* amend_conn = connect_dedicated_order_connection ws_token.token 3 in
-          
-        Lwt.join [
-          connect_public private_conn amend_conn ws_token.token 3;
-          read_private_frames private_conn
-        ])
+          (* Create a single private connection *)
+          Lwt.catch
+            (fun () ->
+              let* pconn = connect_private ws_token.token 3 in
+              
+              Lwt.join [
+                connect_public pconn 3;
+                read_private_frames pconn
+              ])
+            (fun exn ->
+              printf "Connection setup error: %s\n" (Exn.to_string exn);
+              Lwt.return_unit))
         (fun exn ->
           printf "Error: %s\n" (Exn.to_string exn);
           Lwt.return_unit)
@@ -1211,3 +1124,4 @@ let () =
   (* Load environment variables from .env file *)
   export () |> ignore;
   main ()
+
