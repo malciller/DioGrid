@@ -21,7 +21,7 @@ let tracked_pairs = [
   ("TRX/USD", 2.5, 55.0, 0.999, 6);
   ("DOT/USD", 2.5, 2.5, 0.999, 4); 
   ("INJ/USD", 2.5, 0.81, 0.999, 3);
-   ("KSM/USD", 2.5, 0.6, 0.999, 2);  
+  ("KSM/USD", 2.5, 0.6, 0.999, 2); 
 ]
 
 (*===========================
@@ -521,6 +521,11 @@ type order_connection = {
   mutable last_active: float;
 }
 
+type operation_status = {
+  timestamp: float;
+  in_progress: bool;
+}
+
 let create_order_connection conn token =
   {
     conn;
@@ -548,11 +553,105 @@ let is_connection_alive conn =
 let update_last_active conn =
   conn.last_active <- Core_unix.gettimeofday ()
 
+let pending_operations : (string, operation_status) Hashtbl.t = Hashtbl.create (module String)
+
+let is_operation_in_progress operation_key =
+  match Hashtbl.find pending_operations operation_key with
+  | None -> Lwt.return false
+  | Some status ->
+      if not status.in_progress then Lwt.return false
+      else
+        (* Check if the operation has timed out (10 seconds) *)
+        let now = Core_unix.gettimeofday () in
+        if Float.(now -. status.timestamp > 10.0) then (
+          (* Clear timed out operation *)
+          let* () = debug_log (Printf.sprintf "[TIMEOUT] Operation %s timed out and was cleared" 
+            operation_key) in
+          Hashtbl.remove pending_operations operation_key;
+          Lwt.return false
+        ) else
+          Lwt.return true
+
+let mark_operation_started operation_key =
+  let status = {
+    timestamp = Core_unix.gettimeofday ();
+    in_progress = true;
+  } in
+  Hashtbl.set pending_operations ~key:operation_key ~data:status
+
+let mark_operation_completed operation_key =
+  Hashtbl.remove pending_operations operation_key
+
+(* Rate limiting implementation *)
+let rate_counters : (string, float) Hashtbl.t = Hashtbl.create (module String)
+let rate_threshold = 125.0  (* Maximum rate per minute *)
+
+let get_rate_counter symbol =
+  let now = Core_unix.gettimeofday () in
+  match Hashtbl.find rate_counters symbol with
+  | None -> 0.0
+  | Some last_rate -> 
+      (* Calculate time passed since last update *)
+      let time_passed = now -. last_rate in
+      (* Decay rate based on time passed - exponential decay with 5-second half-life *)
+      let decayed_rate = last_rate *. Float.exp (-0.2 *. time_passed) in
+      (* Update the stored rate with the decayed value *)
+      Hashtbl.set rate_counters ~key:symbol ~data:decayed_rate;
+      decayed_rate
+
+let update_rate_counter symbol cost =
+  let current_rate = get_rate_counter symbol in
+  let new_rate = current_rate +. cost in
+  Hashtbl.set rate_counters ~key:symbol ~data:new_rate;
+  new_rate
+
+let rec wait_for_rate_limit symbol transaction_cost =
+  let current_rate = get_rate_counter symbol in
+  if Float.(current_rate +. transaction_cost > rate_threshold) then (
+    let* () = debug_log (Printf.sprintf "[RATE LIMIT] %s - Current: %.2f, Threshold: %.2f, Waiting..." 
+      symbol current_rate rate_threshold) in
+    (* Calculate wait time based on current rate and threshold *)
+    let required_decay = current_rate +. transaction_cost -. rate_threshold in
+    (* Use decay rate to calculate appropriate wait time *)
+    let wait_time = Float.max 2.0 (required_decay *. 0.1) in
+    let* () = Lwt_unix.sleep wait_time in
+    wait_for_rate_limit symbol transaction_cost
+  ) else
+    Lwt.return_unit
+  
+(* Add a global rate counter for connections *)
+let connection_rate_key = "connection"
+
+(* Add connection attempt tracking *)
+let connection_attempts : (string, float) Hashtbl.t = Hashtbl.create (module String)
+let min_reconnect_delay = 2.0  (* Minimum delay between reconnection attempts *)
+
+let can_attempt_reconnect connection_id =
+  let now = Core_unix.gettimeofday () in
+  match Hashtbl.find connection_attempts connection_id with
+  | None -> true
+  | Some last_attempt ->
+      let time_since_last = now -. last_attempt in
+      Float.(time_since_last >=. min_reconnect_delay)
+
+let record_connection_attempt connection_id =
+  let now = Core_unix.gettimeofday () in
+  Hashtbl.set connection_attempts ~key:connection_id ~data:now
+
 let rec connect_dedicated_order_connection token retries =
+  let connection_id = "amend_connection" in
   let* () = debug_log (Printf.sprintf "\n[AMEND] Attempting connection (retries left: %d)" retries) in
   if retries <= 0 then 
     Lwt.fail (Failure "[AMEND] Out of retries for connection")
-  else
+  else if not (can_attempt_reconnect connection_id) then (
+    let* () = debug_log "[AMEND] Throttling reconnection attempts..." in
+    let* () = Lwt_unix.sleep min_reconnect_delay in
+    connect_dedicated_order_connection token (retries - 1)
+  ) else (
+    record_connection_attempt connection_id;
+    (* Use the existing rate limiting system for connections *)
+    let* () = wait_for_rate_limit connection_rate_key 10.0 in
+    
     let url = Uri.of_string "wss://ws-auth.kraken.com/v2" in
     let ctx = Lazy.force Conduit_lwt_unix.default_ctx in
     Lwt.catch
@@ -563,6 +662,9 @@ let rec connect_dedicated_order_connection token retries =
                 `IP (Ipaddr.of_string_exn "104.16.248.94"), 
                 `Port 443)) url in
         
+        (* Update rate counter on successful connection *)
+        let _ = update_rate_counter connection_rate_key 10.0 in
+        
         let amend_conn = create_order_connection conn token in
         
         (* Start background read loop *)
@@ -570,9 +672,21 @@ let rec connect_dedicated_order_connection token retries =
         
         Lwt.return amend_conn)
       (fun e ->
-        let* () = debug_log (Printf.sprintf "[AMEND] Connection error: %s" (Exn.to_string e)) in
-        let* () = Lwt_unix.sleep 2.0 in
-        connect_dedicated_order_connection token (retries - 1))
+        let error_msg = Exn.to_string e in
+        let* () = debug_log (Printf.sprintf "[AMEND] Connection error: %s" error_msg) in
+        
+        (* Add extra delay for rate limit errors *)
+        let backoff_time = 
+          if String.is_substring ~substring:"429 Too Many Requests" error_msg then
+            (* Longer backoff for rate limit errors *)
+            Float.min 60.0 (10.0 *. (2.0 ** float_of_int (3 - retries)))
+          else
+            Float.max min_reconnect_delay 5.0
+        in
+        
+        let* () = debug_log (Printf.sprintf "[AMEND] Backing off for %.1f seconds before retry" backoff_time) in
+        let* () = Lwt_unix.sleep backoff_time in
+        connect_dedicated_order_connection token (retries - 1)))
 
 and read_order_connection_frames amend_conn =
   Lwt.catch
@@ -583,7 +697,8 @@ and read_order_connection_frames amend_conn =
       
       (* Only log non-pong messages *)
       let* () = 
-        if not (String.is_substring msg ~substring:"pong") && not (String.is_substring msg ~substring:"heartbeat") then
+        if not (String.is_substring msg ~substring:"pong") && 
+           not (String.is_substring msg ~substring:"heartbeat") then
           debug_log (Printf.sprintf "[AMEND] Received: %s" msg)
         else
           Lwt.return_unit
@@ -618,83 +733,19 @@ and read_order_connection_frames amend_conn =
         read_order_connection_frames amend_conn)
     (function
       | End_of_file ->
-          let* () = debug_log "[AMEND] Connection closed" in
-          let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
-          read_order_connection_frames new_conn
+          let* () = debug_log "[AMEND] End_of_file encountered. Initiating application restart..." in
+          exit 100  (* Exit immediately with code 100 *)
       | exn ->
           let* () = debug_log (Printf.sprintf "[AMEND] Error: %s" (Exn.to_string exn)) in
-          let* () = Lwt_unix.sleep 2.0 in
-          let* new_conn = connect_dedicated_order_connection amend_conn.token 3 in
-          read_order_connection_frames new_conn)
+          read_order_connection_frames amend_conn)
 
 
 
 
-type operation_status = {
-  timestamp: float;
-  in_progress: bool;
-}
 
 
-let pending_operations : (string, operation_status) Hashtbl.t = Hashtbl.create (module String)
-
-let is_operation_in_progress operation_key =
-  match Hashtbl.find pending_operations operation_key with
-  | None -> Lwt.return false
-  | Some status ->
-      if not status.in_progress then Lwt.return false
-      else
-        (* Check if the operation has timed out (10 seconds) *)
-        let now = Core_unix.gettimeofday () in
-        if Float.(now -. status.timestamp > 10.0) then (
-          (* Clear timed out operation *)
-          let* () = debug_log (Printf.sprintf "[TIMEOUT] Operation %s timed out and was cleared" 
-            operation_key) in
-          Hashtbl.remove pending_operations operation_key;
-          Lwt.return false
-        ) else
-          Lwt.return true
-
-let mark_operation_started operation_key =
-  let status = {
-    timestamp = Core_unix.gettimeofday ();
-    in_progress = true;
-  } in
-  Hashtbl.set pending_operations ~key:operation_key ~data:status
-
-let mark_operation_completed operation_key =
-  Hashtbl.remove pending_operations operation_key
-
-(* Rate limiting implementation *)
-let rate_counters : (string, float) Hashtbl.t = Hashtbl.create (module String)
-let rate_threshold = 60.0  (* Maximum rate per minute *)
-
-let get_rate_counter symbol =
-  let now = Core_unix.gettimeofday () in
-  match Hashtbl.find rate_counters symbol with
-  | None -> 0.0
-  | Some last_rate ->
-      (* Decay the rate based on time passed *)
-      let time_passed = now -. (now |> Float.round_down) in
-      let decayed_rate = last_rate *. Float.exp (-. time_passed *. 0.2) in  (* 5-second half-life *)
-      decayed_rate
-
-let update_rate_counter symbol cost =
-  let current_rate = get_rate_counter symbol in
-  let new_rate = current_rate +. cost in
-  Hashtbl.set rate_counters ~key:symbol ~data:new_rate;
-  new_rate
 
 
-let rec wait_for_rate_limit symbol transaction_cost =
-  let current_rate = get_rate_counter symbol in
-  if Float.(current_rate +. transaction_cost > rate_threshold) then (
-    let* () = debug_log (Printf.sprintf "[RATE LIMIT] %s - Current: %.2f, Waiting for decay..." 
-      symbol current_rate) in
-    let* () = Lwt_unix.sleep 2.0 in
-    wait_for_rate_limit symbol transaction_cost
-  ) else
-    Lwt.return_unit
 
 let rec amend_order_with_retry amend_conn symbol order_id current_price grid_interval price_precision retries =
   (* Add rate limit check before attempting amendment *)
@@ -1204,11 +1255,16 @@ let rec connect_public private_conn amend_conn token retries =
         connect_public private_conn amend_conn token (retries - 1))
 
 
+
+
 let rec connect_private token retries =
   let* () = debug_log (Printf.sprintf "\n[PRIVATE] Attempting private connection (retries left: %d)" retries) in
   if retries <= 0 then 
     Lwt.fail (Failure "[PRIVATE] Out of retries for private connection")
   else
+    (* Use the existing rate limiting system for connections *)
+    let* () = wait_for_rate_limit connection_rate_key 10.0 in
+    
     let url = Uri.of_string "wss://ws-auth.kraken.com/v2" in
     let ctx = Lazy.force Conduit_lwt_unix.default_ctx in
     Lwt.catch
@@ -1224,6 +1280,9 @@ let rec connect_private token retries =
             let* () = debug_log (Printf.sprintf "[PRIVATE] Connection exception: %s" (Exn.to_string e)) in
             Lwt.fail e
         in
+        (* Update rate counter on successful connection *)
+        let _ = update_rate_counter connection_rate_key 10.0 in
+        
         let* () = debug_log "[PRIVATE] Connected successfully to private feed" in
         let sub_msg = private_subscribe_message token in
         let* () = debug_log (Printf.sprintf "[PRIVATE] Sending private subscribe message: %s" sub_msg) in
@@ -1238,8 +1297,20 @@ let rec connect_private token retries =
         
         Lwt.return private_conn)
       (fun e ->
-        let* () = debug_log (Printf.sprintf "[PRIVATE] Connection error: %s" (Exn.to_string e)) in
-        let* () = Lwt_unix.sleep 2.0 in
+        let error_msg = Exn.to_string e in
+        let* () = debug_log (Printf.sprintf "[PRIVATE] Connection error: %s" error_msg) in
+        
+        (* Add extra delay for rate limit errors *)
+        let backoff_time = 
+          if String.is_substring ~substring:"429 Too Many Requests" error_msg then
+            (* Longer backoff for rate limit errors *)
+            Float.min 60.0 (10.0 *. (2.0 ** float_of_int (3 - retries)))
+          else
+            5.0
+        in
+        
+        let* () = debug_log (Printf.sprintf "[PRIVATE] Backing off for %.1f seconds before retry" backoff_time) in
+        let* () = Lwt_unix.sleep backoff_time in
         connect_private token (retries - 1))
 
 (*==================================
@@ -1261,8 +1332,9 @@ let main () =
           (* Create both private and amend connections *)
           Lwt.catch
             (fun () ->
-              let* private_conn = connect_private ws_token.token 3 in
-              let* amend_conn = connect_dedicated_order_connection ws_token.token 3 in
+              (* Increase retry count for more resilience *)
+              let* private_conn = connect_private ws_token.token 5 in
+              let* amend_conn = connect_dedicated_order_connection ws_token.token 5 in
               
               Lwt.join [
                 connect_public private_conn amend_conn ws_token.token 3;
