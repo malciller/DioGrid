@@ -13,15 +13,15 @@ TRADING CONFIGURATION
 =====================*)
 let tracked_pairs = [
 (*Pair, grid_interval, order_qty, sell_multiplier, price_precision*)
-  ("BTC/USD", 1.0, 0.00105, 0.999, 1);
-  ("ETH/USD", 2.5, 0.0045, 0.999, 2);
-  ("XRP/USD", 2.5, 5.0, 0.999, 5);
-  ("SOL/USD", 2.5, 0.07, 0.999, 2);
-  ("ADA/USD", 2.5, 18.0, 0.999, 6); 
+  ("BTC/USD", 1.0, 0.001125, 0.999, 1);
+  ("SOL/USD", 2.5, 0.1, 0.999, 2);
   ("TRX/USD", 2.5, 55.0, 0.999, 6);
-  ("DOT/USD", 2.5, 2.5, 0.999, 4); 
-  ("INJ/USD", 2.5, 0.81, 0.999, 3);
-  ("KSM/USD", 2.5, 0.6, 0.999, 2); 
+  ("ETH/USD", 3.0, 0.007, 0.999, 2);
+  ("XRP/USD", 2.5, 5.0, 0.999, 5);
+  ("ADA/USD", 3.0, 18.0, 0.999, 6); 
+  ("DOT/USD", 3.0, 2.9, 0.999, 4); 
+  ("INJ/USD", 3.0, 1.4, 0.999, 3);
+  ("KSM/USD", 3.0, 0.7, 0.999, 2);
 ]
 
 (*===========================
@@ -170,7 +170,10 @@ let debug_log msg =
      String.is_prefix msg ~prefix:"[AMEND" || 
      String.is_prefix msg ~prefix:"[RATE LIMIT]" ||
      String.is_prefix msg ~prefix:"[ORDER"
-  then Lwt_io.printf "[%s] %s\n" timestamp msg
+  then 
+    (* Ensure the message is valid UTF-8 *)
+    let safe_msg = String.filter msg ~f:(fun c -> Char.to_int c > 0) in
+    Lwt_io.printf "[%s] %s\n" timestamp safe_msg
   else Lwt.return_unit
 
 
@@ -503,8 +506,10 @@ let getprice_precision symbol =
   | None -> 2
 
 let format_precision value precision =
-  let factor = 10.0 ** float_of_int precision in
-  Float.round_down (value *. factor) /. factor
+  (* Convert to string with exact precision *)
+  let formatted = Printf.sprintf "%.*f" precision value in
+  (* Convert back to float to ensure proper numeric representation *)
+  float_of_string formatted
 
 
 
@@ -934,8 +939,10 @@ let place_orders amend_conn symbol current_price =
     (* Debug log final prices *)
     let* () = debug_log (Printf.sprintf "[PRICE DEBUG] %s Final prices - Sell: %s, Buy: %s" 
       symbol 
-      (if String.equal symbol "BTC/USD" then Printf.sprintf "%.0f" sell_limit_price else Printf.sprintf "%.8f" sell_limit_price)
-      (if String.equal symbol "BTC/USD" then Printf.sprintf "%.0f" buy_limit_price else Printf.sprintf "%.8f" buy_limit_price)
+      (if String.equal symbol "BTC/USD" then Printf.sprintf "%.0f" sell_limit_price 
+       else Printf.sprintf "%.*f" price_precision sell_limit_price)
+      (if String.equal symbol "BTC/USD" then Printf.sprintf "%.0f" buy_limit_price 
+       else Printf.sprintf "%.*f" price_precision buy_limit_price)
     ) in
 
     (* Place sell order *)
@@ -946,7 +953,7 @@ let place_orders amend_conn symbol current_price =
         "symbol", `String symbol;
         "side", `String "sell";
         "order_type", `String "limit";
-        "limit_price", `Float sell_limit_price;
+        "limit_price", `Float (format_precision sell_limit_price price_precision);
         "order_qty", `Float sell_qty;
         "time_in_force", `String "gtc";
         "post_only", `Bool true;
@@ -954,8 +961,8 @@ let place_orders amend_conn symbol current_price =
       ];
       "req_id", `Int sell_req_id;
     ] in
-    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.1f" 
-      symbol sell_qty sell_limit_price) in
+    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.*f" 
+      symbol sell_qty price_precision sell_limit_price) in
     let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
     let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
     
@@ -979,7 +986,7 @@ let place_orders amend_conn symbol current_price =
     | _ -> 
         debug_log "[ORDER PLACE] Unexpected sell response"
     in
-        
+    
     (* Place buy order *)
     let buy_req_id = Random.int 10000 + 1 in
     let buy_request = `Assoc [
@@ -988,7 +995,7 @@ let place_orders amend_conn symbol current_price =
         "symbol", `String symbol;
         "side", `String "buy";
         "order_type", `String "limit";
-        "limit_price", `Float buy_limit_price;
+        "limit_price", `Float (format_precision buy_limit_price price_precision);
         "order_qty", `Float order_qty;
         "time_in_force", `String "gtc";
         "post_only", `Bool true;
@@ -996,8 +1003,8 @@ let place_orders amend_conn symbol current_price =
       ];
       "req_id", `Int buy_req_id;
     ] in
-    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.1f" 
-      symbol order_qty buy_limit_price) in
+    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending BUY order for %s: %.8f @ %.*f" 
+      symbol order_qty price_precision buy_limit_price) in
     let buy_frame = Frame.create ~content:(Yojson.Safe.to_string buy_request) () in
     let* () = Websocket_lwt_unix.write amend_conn.conn buy_frame in
     
@@ -1026,7 +1033,6 @@ let place_orders amend_conn symbol current_price =
     let _ = update_rate_counter symbol 2.0 in
     Lwt.return_unit
   )
-
 
 
 
