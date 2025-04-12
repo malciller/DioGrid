@@ -14,14 +14,6 @@ TRADING CONFIGURATION
 let tracked_pairs = [
 (*Pair, grid_interval, order_qty, sell_multiplier, price_precision*)
   ("BTC/USD", 1.0, 0.001125, 0.999, 1);
-  ("SOL/USD", 2.5, 0.1, 0.999, 2);
-  ("TRX/USD", 2.5, 55.0, 0.999, 6);
-  ("ETH/USD", 3.0, 0.007, 0.999, 2);
-  ("XRP/USD", 2.5, 5.0, 0.999, 5);
-  ("ADA/USD", 3.0, 18.0, 0.999, 6); 
-  ("DOT/USD", 3.0, 2.9, 0.999, 4); 
-  ("INJ/USD", 3.0, 1.4, 0.999, 3);
-  ("KSM/USD", 3.0, 0.7, 0.999, 2);
 ]
 
 (*===========================
@@ -961,8 +953,8 @@ let place_orders amend_conn symbol current_price =
       ];
       "req_id", `Int sell_req_id;
     ] in
-    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.*f" 
-      symbol sell_qty price_precision sell_limit_price) in
+    let* () = debug_log (Printf.sprintf "[ORDER PLACE] Sending SELL order for %s: %.8f @ %.3f" 
+      symbol sell_qty (format_precision sell_limit_price price_precision)) in
     let sell_frame = Frame.create ~content:(Yojson.Safe.to_string sell_request) () in
     let* () = Websocket_lwt_unix.write amend_conn.conn sell_frame in
     
